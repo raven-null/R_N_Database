@@ -1,5 +1,5 @@
 /**
- * 阅读页逻辑：展示元数据 + 内嵌预览 + 下载。
+ * 阅读页逻辑：文档优先 —— 打开即整屏是文档，元信息按需展开。
  *
  * 预览策略（与入库时的预处理对应）：
  *   - PDF 原件 → 浏览器原生 PDF 渲染器（最好的阅读器，翻页/缩放/搜索都有）
@@ -23,54 +23,89 @@ const el = {
   tags: document.getElementById('doc-tags'),
   frame: document.getElementById('frame'),
   actions: document.getElementById('actions'),
+  panel: document.getElementById('panel'),
+  panelActions: document.getElementById('panel-actions'),
   notice: document.getElementById('notice'),
   editor: document.getElementById('editor-slot'),
 }
 
+/** 当前文档，供面板/编辑器复用。 */
+let current = null
+
 /**
- * 渲染文档头部信息。
+ * 渲染标题与元信息。
  * @param {object} doc - 元数据
  */
 function renderHeader(doc) {
   document.title = `${doc.title} · R_N 资料库`
   el.title.textContent = doc.title
+  el.title.title = doc.title
 
   const bits = [
-    `<span class="kv">格式</span> ${esc(typeInfo(doc.type).label)}`,
-    `<span class="kv">大小</span> ${fmtSize(doc.size)}`,
-    doc.pages ? `<span class="kv">页数</span> ${doc.pages}` : '',
-    doc.author ? `<span class="kv">作者</span> ${esc(doc.author)}` : '',
-    doc.docCreatedAt ? `<span class="kv">文档日期</span> ${fmtDate(doc.docCreatedAt)}` : '',
-    `<span class="kv">入库</span> ${fmtDate(doc.ingestedAt)}`,
-    `<span class="kv">原文件名</span> <code>${esc(doc.originalName)}</code>`,
+    `<b>${esc(typeInfo(doc.type).label)}</b>`,
+    fmtSize(doc.size),
+    doc.pages ? `${doc.pages} 页` : '',
+    doc.author ? esc(doc.author) : '',
+    doc.docCreatedAt ? `文档日期 ${fmtDate(doc.docCreatedAt)}` : '',
+    `入库 ${fmtDate(doc.ingestedAt)}`,
+    `<code>${esc(doc.originalName)}</code>`,
   ].filter(Boolean)
 
   el.meta.innerHTML = bits.join('<i>·</i>')
 
   const catHtml = (doc.categories ?? [])
-    .map((c) => `<a class="tag cat" href="/index.html">${esc(c)}</a>`).join('')
+    .map((c) => `<span class="tag cat">${esc(c)}</span>`).join('')
+  const tagHtml = (doc.tags ?? []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')
+  el.tags.innerHTML = catHtml + tagHtml
+  el.tags.hidden = !catHtml && !tagHtml
 
   if (doc.summary) {
     el.summary.innerHTML = `<div class="summary-box"><b>AI 摘要</b>${esc(doc.summary)}</div>`
+    el.summary.hidden = false
+  } else {
+    el.summary.innerHTML = ''
+    el.summary.hidden = true
   }
-
-  const tagHtml = (doc.tags ?? []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')
-  el.tags.innerHTML = catHtml + tagHtml
 }
 
 /**
- * 渲染操作按钮。
+ * 渲染顶栏按钮与面板内的编辑入口。
  * @param {object} doc - 元数据
  * @param {boolean} canEdit - 是否有编辑权限
  */
 function renderActions(doc, canEdit) {
-  const canPreview = doc.previewKind && doc.previewKind !== 'none'
   el.actions.innerHTML = `
-    <a class="btn primary" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file`))}" download>下载原件</a>
-    ${canPreview ? `<a class="btn ghost" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file?inline=1`))}" target="_blank" rel="noopener">新窗口打开</a>` : ''}
-    ${canEdit ? `<button class="btn ghost" id="btn-edit">编辑元数据</button>` : ''}
-    <a class="btn ghost" href="/index.html">← 返回列表</a>
+    <a class="btn primary" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file`))}" download>下载</a>
+    <button class="btn ghost" id="btn-info" aria-expanded="false">详情</button>
   `
+
+  el.panelActions.innerHTML = `
+    ${canEdit ? '<button class="btn" id="btn-edit">编辑元数据</button>' : ''}
+    <a class="btn ghost" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file?inline=1`))}" target="_blank" rel="noopener">新窗口打开原件</a>
+  `
+
+  const infoBtn = document.getElementById('btn-info')
+  infoBtn.addEventListener('click', () => togglePanel())
+}
+
+/**
+ * 切换详情面板（与编辑器互斥，避免两个面板一起把文档挤没）。
+ * @param {boolean} [force] - 指定开/关
+ */
+function togglePanel(force) {
+  const open = force ?? el.panel.hidden
+  if (open) closeEditor()
+  el.panel.hidden = !open
+  const btn = document.getElementById('btn-info')
+  if (btn) {
+    btn.classList.toggle('active', open)
+    btn.setAttribute('aria-expanded', String(open))
+  }
+}
+
+/** 收起编辑器。 */
+function closeEditor() {
+  if (el.editor.firstChild) el.editor.innerHTML = ''
 }
 
 /**
@@ -79,16 +114,17 @@ function renderActions(doc, canEdit) {
  */
 function renderPreview(doc) {
   const q = param('q')
+  el.notice.innerHTML = ''
 
   if (doc.extractError) {
-    el.notice.innerHTML = `<div class="banner warn">正文抽取有问题：${esc(doc.extractError)}</div>`
+    el.notice.innerHTML = `<div class="notice warn">正文抽取有问题：${esc(doc.extractError)}</div>`
   }
 
   if (!doc.previewKind || doc.previewKind === 'none') {
     el.frame.innerHTML = `<div class="empty">
       这份文档没有可用的预览件。<br>
       <span class="dim">常见原因：旧版 Office 格式（.doc/.xls/.ppt），或扫描件没有可提取的文本。<br>
-      可以点上方「下载原件」用本地软件打开。</span>
+      可以点上方「下载」用本地软件打开。</span>
     </div>`
     return
   }
@@ -97,26 +133,47 @@ function renderPreview(doc) {
 
   if (doc.previewKind === 'pdf') {
     el.frame.innerHTML = `<iframe class="pdf" src="${esc(src)}" title="文档预览"></iframe>`
-    if (doc.previewNote) {
-      el.notice.innerHTML = `<div class="banner info">预览件来源：${esc(doc.previewNote)}</div>`
-    }
-    if (q) {
-      el.notice.innerHTML += `<div class="banner info">浏览器 PDF 阅读器内可按 Ctrl+F 搜索「${esc(q)}」</div>`
-    }
+    const hints = []
+    if (doc.previewNote) hints.push(esc(doc.previewNote))
+    if (q) hints.push(`按 Ctrl+F 可搜索「${esc(q)}」`)
+    if (hints.length) el.notice.innerHTML += `<div class="notice">${hints.join('　·　')}</div>`
     return
   }
 
   // HTML / 文本预览
   el.frame.innerHTML = `<iframe class="html" src="${esc(src)}" title="文档预览" sandbox="allow-same-origin"></iframe>`
 
-  const notes = []
-  if (doc.previewNote) notes.push(`预览件来源：${doc.previewNote}`)
-  if (doc.previewKind === 'html' && /HTML 降级/.test(doc.previewNote ?? '')) {
-    notes.push('安装 LibreOffice 后可转为保真度更高的 PDF 预览')
-  }
-  if (notes.length) {
-    el.notice.innerHTML = `<div class="banner info">${notes.map(esc).join('<br>')}</div>`
-  }
+  const hints = []
+  if (doc.previewNote) hints.push(esc(doc.previewNote))
+  if (/HTML 降级/.test(doc.previewNote ?? '')) hints.push('安装 LibreOffice 可转为保真度更高的 PDF 预览')
+  if (hints.length) el.notice.innerHTML = `<div class="notice">${hints.join('　·　')}</div>`
+}
+
+/**
+ * 打开编辑器（收起详情面板，把纵向空间让给表单）。
+ * @param {boolean} canEdit - 是否有编辑权限
+ * @param {object|null} taxonomy - 词表
+ */
+function openEditor(canEdit, taxonomy) {
+  if (!canEdit || !current) return
+  togglePanel(false)
+
+  const mount = (doc) => mountEditor(el.editor, {
+    doc,
+    taxonomy,
+    canEdit: true,
+    onSaved: (next) => {
+      current = next
+      renderHeader(next)
+      renderActions(next, true)
+      // 重建编辑器以反映刚落盘的值
+      mount(next)
+    },
+    onDeleted: () => { location.href = '/index.html' },
+  })
+
+  mount(current)
+  el.editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
 /**
@@ -131,35 +188,17 @@ async function main() {
 
   try {
     const [doc, editable] = await Promise.all([fetchDoc(id), canEditNow()])
+    current = doc
+
     renderHeader(doc)
     renderActions(doc, editable)
     renderPreview(doc)
 
     if (editable) {
+      const btn = document.getElementById('btn-edit')
       // 词表用于分类多选框；拿不到也不阻塞查看
       const taxonomy = await fetchTaxonomy().catch(() => null)
-      const btn = document.getElementById('btn-edit')
-      btn?.addEventListener('click', () => {
-        mountEditor(el.editor, {
-          doc,
-          taxonomy,
-          canEdit: true,
-          onSaved: (next) => {
-            // 用返回的新元数据就地刷新，不必整页重载
-            renderHeader(next)
-            renderActions(next, true)
-            if (el.editor.firstChild) {
-              mountEditor(el.editor, {
-                doc: next, taxonomy, canEdit: true,
-                onSaved: (again) => location.reload(),
-                onDeleted: () => { location.href = '/index.html' },
-              })
-            }
-          },
-          onDeleted: () => { location.href = '/index.html' },
-        })
-        el.editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-      })
+      btn?.addEventListener('click', () => openEditor(true, taxonomy))
     }
   } catch (err) {
     el.title.textContent = '打开失败'

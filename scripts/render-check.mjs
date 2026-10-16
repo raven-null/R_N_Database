@@ -256,28 +256,39 @@ async function checkList(client) {
    阅读页检查
    ============================================================ */
 
-/** 阅读页要问的渲染事实。 */
+/** 阅读页要问的渲染事实（文档优先布局）。 */
 const VIEW_PROBE = `(() => {
   const box = (sel) => {
     const el = document.querySelector(sel)
     if (!el) return null
     const r = el.getBoundingClientRect()
-    return { w: Math.round(r.width), h: Math.round(r.height) }
+    return { w: Math.round(r.width), h: Math.round(r.height), y: Math.round(r.y) }
   }
   const frame = document.querySelector('iframe')
+  const panel = document.getElementById('panel')
+  const doc = document.documentElement
   return {
+    viewportH: innerHeight,
+    viewportW: innerWidth,
+    bodyOverflow: getComputedStyle(document.body).overflow,
     title: document.getElementById('doc-title')?.textContent?.trim() ?? null,
     titleFontSize: getComputedStyle(document.getElementById('doc-title')).fontSize,
-    metaText: document.getElementById('doc-meta')?.textContent?.trim()?.slice(0, 70) ?? null,
-    notice: document.getElementById('notice')?.textContent?.trim()?.slice(0, 70) ?? null,
+    titleWhiteSpace: getComputedStyle(document.getElementById('doc-title')).whiteSpace,
+    topbar: box('.view-topbar'),
+    frameBox: box('#frame'),
+    frameFillRatio: box('#frame') ? +(box('#frame').h / innerHeight).toFixed(3) : null,
+    // 关键：详情面板默认必须折叠
+    panelHidden: panel ? panel.hasAttribute('hidden') : null,
+    panelBox: panel && !panel.hasAttribute('hidden') ? box('#panel') : null,
+    metaText: document.getElementById('doc-meta')?.textContent?.trim()?.slice(0, 60) ?? null,
     tagCount: document.querySelectorAll('#doc-tags .tag').length,
-    actionCount: document.querySelectorAll('.actions a').length,
-    actionLabels: [...document.querySelectorAll('.actions a')].map(a => a.textContent.trim()),
+    topbarButtons: [...document.querySelectorAll('.view-topbar .actions .btn')].map(b => b.textContent.trim()),
     downloadHref: [...document.querySelectorAll('.actions a')].find(a => a.textContent.includes('下载'))?.getAttribute('href') ?? null,
     frameKind: frame ? (frame.className || 'iframe') : null,
-    frameSrc: frame ? frame.getAttribute('src')?.slice(0, 60) : null,
-    frameBox: box('iframe'),
-    frameHeightSet: frame ? getComputedStyle(frame).height : null,
+    frameSrc: frame ? frame.getAttribute('src')?.slice(0, 55) : null,
+    // 页面是否还能滚动（文档优先布局应当锁住整页滚动）
+    docScrollH: doc.scrollHeight,
+    pageScrolls: doc.scrollHeight > innerHeight + 2,
   }
 })()`
 
@@ -295,26 +306,43 @@ async function checkView(client, id, label, shotName) {
   const r = await evaluate(client, VIEW_PROBE)
 
   const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+  line('视口', `${r.viewportW}×${r.viewportH}`)
   line('标题', r.title ?? '（空）')
-  line('标题字号', r.titleFontSize)
-  line('元信息', r.metaText ?? '（空）')
-  line('标签数', r.tagCount)
-  line('操作按钮', `${r.actionCount} 个：${r.actionLabels.join(' / ')}`)
-  line('下载链接', r.downloadHref)
+  line('标题字号/不换行', `${r.titleFontSize} / ${r.titleWhiteSpace}`)
+  line('顶栏高度', r.topbar ? `${r.topbar.h}px（占视口 ${(r.topbar.h / r.viewportH * 100).toFixed(1)}%）` : '缺失')
+  line('文档区高度', r.frameBox ? `${r.frameBox.h}px（占视口 ${(r.frameFillRatio * 100).toFixed(1)}%）` : '缺失')
+  line('详情面板', r.panelHidden === true ? '默认折叠 ✓' : r.panelHidden === false ? '★ 默认展开了' : '缺失')
+  line('顶栏按钮', r.topbarButtons.join(' / '))
+  line('下载链接', r.downloadHref ?? '缺失')
   line('预览类型', `${r.frameKind} → ${r.frameSrc}…`)
-  line('预览区尺寸', r.frameBox ? `${r.frameBox.w}×${r.frameBox.h}（CSS 高度 ${r.frameHeightSet}）` : '缺失')
-  if (r.notice) line('提示', r.notice)
+  line('整页滚动', r.pageScrolls ? `★ 会滚动（文档高度 ${r.docScrollH}）` : '已锁定（文档区内部滚动）')
 
   const issues = []
   if (!r.title || r.title === '加载中…') issues.push('标题未加载')
   if (!r.frameKind) issues.push('没有预览 iframe')
-  if (r.frameBox && r.frameBox.h < 200) issues.push(`预览区高度异常（${r.frameBox.h}px），可能塌陷`)
+  // 文档优先：文档区应吃掉绝大部分视口
+  if (r.frameFillRatio !== null && r.frameFillRatio < 0.85) {
+    issues.push(`文档区只占视口 ${(r.frameFillRatio * 100).toFixed(1)}%，元信息仍占太多空间`)
+  }
+  if (r.topbar && r.topbar.h > 60) issues.push(`顶栏过高（${r.topbar.h}px）`)
+  if (r.panelHidden !== true) issues.push('详情面板默认应当是折叠的')
+  if (r.pageScrolls) issues.push('整页不应滚动（应锁在文档区内滚动）')
   if (!r.downloadHref) issues.push('没有下载链接')
-  if (issues.length === 0) console.log('\n  ✓ 阅读页渲染正常')
+  if (issues.length === 0) console.log('\n  ✓ 文档优先布局正常')
   else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
 
   const bytes = await screenshot(client, shotName)
   console.log(`  截图已存 .shots/${shotName}.png（${(bytes / 1024).toFixed(1)}KB）`)
+
+  // 展开详情面板：验证面板出现且文档区相应收缩，然后再收起
+  await evaluate(client, `document.getElementById('btn-info')?.click()`)
+  await new Promise((r2) => setTimeout(r2, 300))
+  const opened = await evaluate(client, VIEW_PROBE)
+  const okOpen = opened.panelHidden === false && (opened.frameBox?.h ?? 0) < (r.frameBox?.h ?? 0)
+  console.log(`  展开详情：面板高 ${opened.panelBox?.h ?? 0}px，文档区 ${r.frameBox?.h ?? 0} → ${opened.frameBox?.h ?? 0}px  ${okOpen ? '✓' : '✗'}`)
+  if (!okOpen) issues.push('点「详情」后面板未展开或文档区未相应收缩')
+  await screenshot(client, `${shotName}-panel`)
+
   return issues.length === 0
 }
 

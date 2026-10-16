@@ -4,27 +4,34 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>文档 · R_N 资料库</title>
-  <link rel="stylesheet" href="/css/style.css?v=0.3.0">
+  <link rel="stylesheet" href="/css/style.css?v=0.4.0">
 </head>
 <body class="view-page">
-  <header class="topbar">
-    <a class="brand" href="/">R_N <span>资料库</span></a>
-    <div class="view-title-wrap">
-      <h1 id="doc-title">加载中…</h1>
-      <div id="doc-meta" class="doc-meta top"></div>
-    </div>
+  <!-- 阅读页刻意做成「文档优先」：
+       顶栏只有返回 / 标题 / 下载 / 详情开关，其余信息收进可折叠面板，
+       文档本身占满剩余的全部视口高度。 -->
+  <header class="view-topbar">
+    <a class="icon-btn" href="/index.html" title="返回列表">←</a>
+    <h1 id="doc-title">加载中…</h1>
     <div id="actions" class="actions"></div>
   </header>
 
-  <div id="notice"></div>
+  <div id="notice" class="notice-slot"></div>
+
+  <!-- 元信息 / 摘要 / 标签：默认折叠 -->
+  <div id="panel" class="panel" hidden>
+    <div id="doc-meta" class="doc-meta"></div>
+    <div id="doc-summary"></div>
+    <div id="doc-tags" class="doc-tags"></div>
+    <div id="panel-actions" class="panel-actions"></div>
+  </div>
+
   <div id="editor-slot"></div>
-  <div id="doc-summary"></div>
-  <div id="doc-tags" class="doc-tags wrap-tags"></div>
 
   <div id="frame" class="frame">
     <div class="empty">正在加载预览…</div>
   </div>
 
-  <script type="module" src="/js/view.js?v=0.3.0"></script>
+  <script type="module" src="/js/view.js?v=0.4.0"></script>
 </body>
 </html>
