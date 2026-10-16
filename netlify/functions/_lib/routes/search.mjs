@@ -10,8 +10,8 @@
 
 import { checkAuth } from '../auth.mjs'
 import { ok, badRequest, forbidden, unauthorized, serverError } from '../respond.mjs'
-import { readAllMeta, readIndex, readDocText } from '../repo.mjs'
-import { searchIndex, makeSnippet } from '../tokenize.mjs'
+import { readAllMeta, readIndexMeta, readPostingsForTerms, readDocText } from '../repo.mjs'
+import { searchIndex, makeSnippet, queryTerms } from '../tokenize.mjs'
 
 /** 默认返回条数。 */
 const DEFAULT_LIMIT = 30
@@ -39,8 +39,8 @@ export async function searchRoute(req, url) {
       ? docs.filter((d) => d.visibility === 'public')
       : docs
 
-    const index = await readIndex()
-    if (!index?.postings) {
+    const indexMeta = await readIndexMeta()
+    if (!indexMeta) {
       return ok({
         query: q,
         total: 0,
@@ -49,10 +49,26 @@ export async function searchRoute(req, url) {
       }, { req })
     }
 
+    // ★ 只读查询词所在的分片，而不是全量索引。
+    // 全量索引 256 份文档时已 6.23MB，实测每次检索读全量要 134–149ms；
+    // 分片后通常只碰 2–6 片。
+    const terms = queryTerms(q).map((t) => t.term)
+    const { postings, shardsRead } = await readPostingsForTerms(terms)
+
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || DEFAULT_LIMIT, 1), 100)
     // 打分在 tokenize.searchIndex 里做（BM25：词频饱和 + 长度归一化 +
-    // 查询词条分级）。这里只把查询串与候选文档传进去。
-    const hits = searchIndex(index, q, { docs: visible, limit })
+    // 查询词条分级）。这里给它一个"局部索引"：postings 只含相关分片，
+    // 而 docCount / avgLength / lengths 来自 meta。
+    const hits = searchIndex(
+      {
+        postings,
+        docCount: indexMeta.docCount,
+        avgLength: indexMeta.avgLength,
+        lengths: indexMeta.lengths,
+      },
+      q,
+      { docs: visible, limit },
+    )
 
     // 为命中项生成正文片段：只对命中的那几条读正文，不整库加载
     const items = []
@@ -96,7 +112,8 @@ export async function searchRoute(req, url) {
     return ok({
       query: q,
       total: items.length,
-      indexVersion: index.version,
+      indexVersion: indexMeta.version,
+      shardsRead,
       items,
     }, { req })
   } catch (err) {

@@ -24,11 +24,17 @@ export async function readMeta(id) {
   return store.get(id, { type: 'json' }).catch(() => null)
 }
 
-/** 读倒排索引。 */
-export async function readIndex() {
-  const store = await getDocsStore(STORES.INDEX)
-  return store.get('search-index', { type: 'json' }).catch(() => null)
-}
+/**
+ * 读倒排索引。
+ *
+ * 注意：索引是**分片**存储的（见 index-store.mjs）。这里不再返回全量
+ * postings —— 那样每次检索都要读 6MB+。调用方应先用 `readIndexMeta()`
+ * 拿元信息与文档长度表，再用 `readPostingsForTerms(terms)` 只取
+ * 查询词所在的分片。
+ *
+ * @returns {Promise<object|null>} { meta, postings } —— postings 需另行按词条获取
+ */
+export { readIndexMeta, readPostingsForTerms } from './index-store.mjs'
 
 /** 读分类词表。 */
 export async function readTaxonomy() {

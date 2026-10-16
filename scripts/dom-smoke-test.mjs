@@ -118,6 +118,12 @@ function makeDom(page) {
     }
   }
 
+  // jsdom 未实现 scrollIntoView（真实浏览器有），补个空实现。
+  // 这是测试环境的能力缺口，不该为了迁就它去改应用代码。
+  if (!window.Element.prototype.scrollIntoView) {
+    window.Element.prototype.scrollIntoView = () => {}
+  }
+
   return { dom, errors }
 }
 
@@ -139,6 +145,7 @@ async function runModule(dom, relPath) {
   globalThis.localStorage = window.localStorage
   globalThis.alert = () => {}
   globalThis.prompt = () => null
+  globalThis.confirm = () => false   // 避免测试里误触删除
   globalThis.fetch = window.fetch
 
   // 加时间戳绕开 ESM 模块缓存，保证多轮测试互不干扰
@@ -152,6 +159,13 @@ async function runModule(dom, relPath) {
 
 async function testListPage() {
   console.log('\n【列表页 index.html】')
+
+  // 断言必须**与库内容无关** —— 早期版本把「简历第一版」这类标题写死在断言里，
+  // 库里从 3 份变成 256 份后全部崩掉。现在改为用真实数据驱动断言。
+  const manifestRes = await nodeFetch(`${BASE}/api/v1/manifest`)
+  const manifest = (await manifestRes.json()).data
+  const allDocs = manifest.docs ?? []
+
   const { dom, errors } = makeDom('index.html')
   const { document } = dom.window
 
@@ -165,46 +179,70 @@ async function testListPage() {
   )
 
   const rows = document.querySelectorAll('.doc')
-  check(rows.length >= 3, `渲染了 ${rows.length} 条文档（期望 ≥3）`)
+  const expectShown = Math.min(allDocs.length, 60)   // 首屏上限 60
+  check(
+    rows.length === expectShown,
+    `渲染了 ${rows.length} 条（库里 ${allDocs.length} 份，首屏预期 ${expectShown}）`,
+  )
 
   const titles = [...document.querySelectorAll('.doc-title')].map((e) => e.textContent.trim())
-  check(titles.some((t) => t.includes('简历')), `标题含「简历第一版」：${titles.join(' | ')}`)
-  check(titles.some((t) => t.includes('动效说明')), '标题含「动效说明」')
-
-  const chips = [...document.querySelectorAll('.chip')].map((e) => e.textContent.trim())
-  check(chips.some((c) => c.startsWith('求职职场')), `分类切面含「求职职场」：${chips.slice(0, 8).join(' / ')}`)
-
-  const stats = document.getElementById('stats')?.textContent ?? ''
-  check(/\d+\s*份/.test(stats), `统计行显示份数：${stats}`)
+  check(titles.length > 0 && titles.every((t) => t.length > 0), '每条都有非空标题')
 
   const badges = [...new Set([...document.querySelectorAll('.type-badge')].map((e) => e.textContent.trim()))]
-  check(badges.includes('PDF') && badges.includes('PPTX'), `类型徽标正确：${badges.join(',')}`)
+  check(badges.length > 0, `类型徽标：${badges.join(',')}`)
 
-  // ---- 点分类切面 → 真的筛选 ----
-  const catChip = [...document.querySelectorAll('.chip')].find((e) => e.textContent.trim().startsWith('求职职场'))
-  if (!catChip) {
-    check(false, '找不到「求职职场」切面，无法验证筛选')
+  const chips = [...document.querySelectorAll('.chip')].map((e) => e.textContent.trim())
+  check(chips.some((c) => c.startsWith('全部')), `分类切面含「全部」：${chips.slice(0, 6).join(' / ')}`)
+
+  const stats = document.getElementById('stats')?.textContent ?? ''
+  check(/\d+\s*份/.test(stats), `统计行：${stats}`)
+
+  // ---- 点分类切面 → 真的按该分类筛选 ----
+  // 挑一个库里确实存在的分类（数量 >= 1），并断言渲染出的每一条都带这个分类
+  const catCount = {}
+  for (const d of allDocs) for (const c of d.categories ?? []) catCount[c] = (catCount[c] ?? 0) + 1
+  const pickCat = Object.entries(catCount).sort((a, b) => b[1] - a[1])[0]
+
+  if (!pickCat) {
+    check(false, '库里没有任何分类，无法验证筛选')
   } else {
-    catChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
-    await tick(120)
-    const n = document.querySelectorAll('.doc').length
-    check(n === 1, `点「求职职场」后剩 ${n} 条（期望 1）`)
+    const [catName, catTotal] = pickCat
+    const catChip = [...document.querySelectorAll('.chip')]
+      .find((e) => e.textContent.trim().startsWith(catName))
 
-    catChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))  // 取消
-    await tick(120)
+    if (!catChip) {
+      check(false, `找不到分类切面「${catName}」`)
+    } else {
+      catChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      await tick(200)
+
+      const shown = document.querySelectorAll('.doc').length
+      const expectCount = Math.min(catTotal, 60)
+      check(shown === expectCount, `点「${catName}」后剩 ${shown} 条（预期 ${expectCount}）`)
+
+      const allHaveCat = [...document.querySelectorAll('.doc .cats')]
+        .every((e) => e.textContent.includes(catName))
+      check(allHaveCat, '筛出的每一条都确实带该分类')
+
+      catChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))  // 取消
+      await tick(200)
+    }
   }
 
-  // ---- 搜索框即时筛选 ----
+  // ---- 搜索框即时筛选：用真实标题里的片段 ----
+  const probe = allDocs[0]
+  const probeTerm = String(probe.title).slice(0, 6)
   const search = document.getElementById('search')
-  search.value = '动效'
+  search.value = probeTerm
   search.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
-  await tick(350)
+  await tick(400)
 
-  const afterSearch = document.querySelectorAll('.doc').length
-  const searchTitles = [...document.querySelectorAll('.doc-title')].map((e) => e.textContent.trim())
+  const found = [...document.querySelectorAll('.doc')]
+    .map((e) => e.querySelector('.doc-title')?.textContent?.trim() ?? '')
   check(
-    afterSearch === 1 && (searchTitles[0] ?? '').includes('动效'),
-    `搜「动效」命中 ${afterSearch} 条：${searchTitles.join(' | ')}`,
+    found.length > 0 && found.every((t) => t.includes(probeTerm) || t.toLowerCase().includes(probeTerm.toLowerCase())),
+    `搜「${probeTerm}」命中 ${found.length} 条且都含该词`,
+    found.slice(0, 4).join(' | '),
   )
 
   check(errors.length === 0, '运行期无 jsdom 报错', errors.join('\n      '))
@@ -234,7 +272,10 @@ async function testViewPage() {
     await waitFor(() => document.getElementById('doc-title')?.textContent !== '加载中…')
 
     const title = document.getElementById('doc-title').textContent
-    check(title.includes('简历'), `PDF：标题 = ${title}`)
+    check(
+      title === pdf.title,
+      `PDF：标题与接口一致（页面「${title}」/ 接口「${pdf.title}」）`,
+    )
 
     const iframe = document.querySelector('iframe.pdf')
     check(Boolean(iframe), 'PDF：挂上了内嵌预览 iframe')
@@ -276,6 +317,81 @@ async function testViewPage() {
 }
 
 /* ============================================================
+   编辑面板（只测渲染，不测写入）
+   ============================================================ */
+
+/**
+ * 编辑面板的 UI 渲染测试。
+ *
+ * 刻意**不点保存**：写入路径由 scripts/test-write-api.mjs 用临时文档覆盖，
+ * 这里若真保存就会改动库里已有资料。职责分离，测试之间不互相污染。
+ */
+async function testEditorPanel() {
+  console.log('\n【编辑面板 view.html】')
+
+  const listRes = await nodeFetch(`${BASE}/api/v1/docs?limit=1`)
+  const list = await listRes.json()
+  const doc = list.data.items[0]
+  if (!doc) {
+    check(false, '库里没有文档，跳过编辑面板测试')
+    return
+  }
+
+  const { dom, errors } = makeDom(`view.html?id=${doc.id}`)
+  const { document } = dom.window
+  await runModule(dom, 'js/view.js')
+
+  await waitFor(() => document.getElementById('doc-title')?.textContent !== '加载中…')
+  await tick(400)   // 等 canEditNow() 与 taxonomy 拉取完成
+
+  const editBtn = document.getElementById('btn-edit')
+  check(Boolean(editBtn), '本地开发（admin 角色）出现「编辑元数据」按钮')
+
+  if (editBtn) {
+    editBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    await tick(300)
+
+    const editor = document.querySelector('.editor')
+    check(Boolean(editor), '点击后渲染出编辑面板')
+
+    if (editor) {
+      const titleInput = document.getElementById('ed-title')
+      check(Boolean(titleInput), '有标题输入框')
+      check(
+        (titleInput?.value ?? '').length > 0,
+        `标题已预填：${titleInput?.value?.slice(0, 30)}`,
+      )
+
+      const catBoxes = document.querySelectorAll('.cat-opt input')
+      check(catBoxes.length >= 9, `分类多选框有 ${catBoxes.length} 个（受控词表）`)
+      check(
+        [...catBoxes].filter((cb) => cb.checked).length >= 1,
+        '当前分类已被勾选',
+      )
+
+      check(Boolean(document.getElementById('ed-tags')), '有标签输入框')
+      check(Boolean(document.getElementById('ed-summary')), '有摘要输入框')
+      check(Boolean(document.getElementById('ed-visibility')), '有可见性选择器')
+      check(Boolean(document.getElementById('ed-save')), '有保存按钮')
+      check(Boolean(document.getElementById('ed-delete')), '有删除按钮')
+
+      const del = document.getElementById('ed-delete')
+      check(/删除/.test(del?.textContent ?? ''), `删除按钮文案：${del?.textContent?.trim()}`)
+
+      // 取消应当收起面板，且不改动任何东西
+      document.getElementById('ed-cancel').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }),
+      )
+      await tick(150)
+      check(!document.querySelector('.editor'), '点取消后面板收起')
+    }
+  }
+
+  check(errors.length === 0, '无 jsdom 报错', errors.join('\n      '))
+  dom.window.close()
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 
@@ -301,6 +417,7 @@ async function main() {
 
   await testListPage()
   await testViewPage()
+  await testEditorPanel()
 
   console.log('\n────────────────────────────────')
   console.log(`  通过 ${passed} / 失败 ${failed}`)

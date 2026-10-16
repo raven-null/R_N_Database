@@ -175,6 +175,37 @@ export function computeIndexVersion(docs) {
 }
 
 /**
+ * 取一份文档的元数据文本（标题/文件名/摘要/标签/分类）。
+ *
+ * 与正文分开是为了让调用方能明确控制两部分如何拼接 ——
+ * 全量建索引与增量更新都必须用同一份逻辑，否则两条路径产物会不一致。
+ *
+ * @param {object} doc - 文档元数据
+ * @returns {string} 元数据文本
+ */
+export function metaTextOf(doc) {
+  return [
+    doc.title, doc.originalName, doc.summary,
+    ...(doc.tags ?? []), ...(doc.categories ?? []),
+  ].filter(Boolean).join(' ')
+}
+
+/**
+ * 统计一份文档的词频。
+ *
+ * @param {string} metaText - 元数据文本
+ * @param {string} bodyText - 正文
+ * @returns {Map<string, number>} 词条 → 词频
+ */
+export function termCounts(metaText, bodyText) {
+  const tf = new Map()
+  for (const term of tokenize(`${metaText}\n${bodyText}`)) {
+    tf.set(term, (tf.get(term) ?? 0) + 1)
+  }
+  return tf
+}
+
+/**
  * 构建倒排索引（带词频）。
  *
  * postings 结构：`{ 词条: { 文档id: 词频 } }`
@@ -191,22 +222,11 @@ export function buildIndex(docs, textOf) {
   const postings = new Map()
   /** @type {Record<string, number>} 文档 id → 文档长度（词条总数） */
   const lengths = {}
-  /** @type {Record<string, number>} 文档 id → 各字段是否命中的标记由查询侧处理 */
   let totalLength = 0
 
   for (const doc of docs) {
-    const metaText = [
-      doc.title, doc.originalName, doc.summary,
-      ...(doc.tags ?? []), ...(doc.categories ?? []),
-    ].filter(Boolean).join(' ')
-
     const bodyText = textOf ? String(textOf(doc) ?? '') : ''
-
-    // 词频统计（同一份文档内同一个词出现几次）
-    const tf = new Map()
-    for (const term of tokenize(`${metaText}\n${bodyText}`)) {
-      tf.set(term, (tf.get(term) ?? 0) + 1)
-    }
+    const tf = termCounts(metaTextOf(doc), bodyText)
 
     let docLen = 0
     for (const [term, count] of tf) {

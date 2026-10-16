@@ -435,3 +435,117 @@ iframe.html { height: calc(100vh - 190px); min-height: 460px; }
   .doc { padding: 11px 12px; gap: 10px; }
   .go { display: none; }
 }
+
+/* ============================================================
+   编辑面板
+   ============================================================ */
+
+#editor-slot:empty { display: none; }
+
+.editor {
+  margin: 14px 20px 0;
+  padding: 16px 18px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.editor-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  font-size: 14px;
+}
+.editor-head .dim { font-size: 12px; }
+
+.field {
+  display: block;
+  margin-bottom: 12px;
+}
+.field > span {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.field em {
+  font-style: normal;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.field input[type="text"],
+.field textarea,
+.field select {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  outline: none;
+  resize: vertical;
+}
+.field input:focus,
+.field textarea:focus,
+.field select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.cat-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cat-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+  transition: all .14s;
+}
+.cat-opt:hover { border-color: var(--accent); }
+.cat-opt.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.cat-opt input { display: none; }
+
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.editor-actions .spacer { flex: 1; }
+
+.btn.danger {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+}
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  border-color: var(--bad);
+}
+.btn:disabled { opacity: .55; cursor: default; }
+
+.editor-msg { margin-top: 10px; font-size: 13px; min-height: 18px; }
+.editor-msg.ok { color: var(--ok); }
+.editor-msg.err { color: var(--bad); }
+
+@media (max-width: 720px) {
+  .editor { margin-left: 12px; margin-right: 12px; padding: 14px; }
+}

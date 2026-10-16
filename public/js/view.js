@@ -12,8 +12,9 @@
  * @module public/js/view
  */
 
-import { fetchDoc, authedUrl } from './api.js'
+import { fetchDoc, fetchTaxonomy, authedUrl } from './api.js'
 import { esc, fmtSize, fmtDate, typeInfo, param } from './util.js'
+import { mountEditor, canEditNow } from './edit.js'
 
 const el = {
   title: document.getElementById('doc-title'),
@@ -23,6 +24,7 @@ const el = {
   frame: document.getElementById('frame'),
   actions: document.getElementById('actions'),
   notice: document.getElementById('notice'),
+  editor: document.getElementById('editor-slot'),
 }
 
 /**
@@ -59,12 +61,14 @@ function renderHeader(doc) {
 /**
  * 渲染操作按钮。
  * @param {object} doc - 元数据
+ * @param {boolean} canEdit - 是否有编辑权限
  */
-function renderActions(doc) {
+function renderActions(doc, canEdit) {
   const canPreview = doc.previewKind && doc.previewKind !== 'none'
   el.actions.innerHTML = `
     <a class="btn primary" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file`))}" download>下载原件</a>
     ${canPreview ? `<a class="btn ghost" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file?inline=1`))}" target="_blank" rel="noopener">新窗口打开</a>` : ''}
+    ${canEdit ? `<button class="btn ghost" id="btn-edit">编辑元数据</button>` : ''}
     <a class="btn ghost" href="/index.html">← 返回列表</a>
   `
 }
@@ -126,10 +130,37 @@ async function main() {
   }
 
   try {
-    const doc = await fetchDoc(id)
+    const [doc, editable] = await Promise.all([fetchDoc(id), canEditNow()])
     renderHeader(doc)
-    renderActions(doc)
+    renderActions(doc, editable)
     renderPreview(doc)
+
+    if (editable) {
+      // 词表用于分类多选框；拿不到也不阻塞查看
+      const taxonomy = await fetchTaxonomy().catch(() => null)
+      const btn = document.getElementById('btn-edit')
+      btn?.addEventListener('click', () => {
+        mountEditor(el.editor, {
+          doc,
+          taxonomy,
+          canEdit: true,
+          onSaved: (next) => {
+            // 用返回的新元数据就地刷新，不必整页重载
+            renderHeader(next)
+            renderActions(next, true)
+            if (el.editor.firstChild) {
+              mountEditor(el.editor, {
+                doc: next, taxonomy, canEdit: true,
+                onSaved: (again) => location.reload(),
+                onDeleted: () => { location.href = '/index.html' },
+              })
+            }
+          },
+          onDeleted: () => { location.href = '/index.html' },
+        })
+        el.editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      })
+    }
   } catch (err) {
     el.title.textContent = '打开失败'
     el.frame.innerHTML = `<div class="empty">${esc(err.message)}<br>

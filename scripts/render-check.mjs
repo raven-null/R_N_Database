@@ -319,6 +319,97 @@ async function checkView(client, id, label, shotName) {
 }
 
 /* ============================================================
+   编辑面板检查
+   ============================================================ */
+
+/** 点开编辑面板后要问的渲染事实。 */
+const EDITOR_PROBE = `(() => {
+  const box = (sel) => {
+    const el = document.querySelector(sel)
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { w: Math.round(r.width), h: Math.round(r.height) }
+  }
+  const style = (sel, prop) => {
+    const el = document.querySelector(sel)
+    return el ? getComputedStyle(el)[prop] : null
+  }
+  const editor = document.querySelector('.editor')
+  const opts = [...document.querySelectorAll('.cat-opt')]
+  return {
+    hasEditButton: Boolean(document.getElementById('btn-edit')),
+    hasEditor: Boolean(editor),
+    editorBox: box('.editor'),
+    editorBorderColor: style('.editor', 'borderColor'),
+    titleValue: document.getElementById('ed-title')?.value?.slice(0, 30) ?? null,
+    catOptionCount: opts.length,
+    checkedCount: opts.filter(o => o.querySelector('input')?.checked).length,
+    firstOptBox: opts[0] ? { w: Math.round(opts[0].getBoundingClientRect().width), h: Math.round(opts[0].getBoundingClientRect().height) } : null,
+    firstOptRadius: style('.cat-opt', 'borderRadius'),
+    activeOptBg: style('.cat-opt.on', 'backgroundColor'),
+    hasTags: Boolean(document.getElementById('ed-tags')),
+    hasSummary: Boolean(document.getElementById('ed-summary')),
+    hasVisibility: Boolean(document.getElementById('ed-visibility')),
+    hasSave: Boolean(document.getElementById('ed-save')),
+    hasDelete: Boolean(document.getElementById('ed-delete')),
+    deleteColor: style('#ed-delete', 'color'),
+    scrollHeight: document.documentElement.scrollHeight,
+  }
+})()`
+
+/**
+ * 检查编辑面板的真实布局。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - 文档 id
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkEditor(client, id) {
+  console.log('\n【编辑面板真实渲染】')
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+
+  // 点开编辑面板（等前端把角色与词表都拉回来）
+  const clicked = await evaluate(client, `(() => {
+    const b = document.getElementById('btn-edit')
+    if (!b) return false
+    b.click()
+    return true
+  })()`)
+  if (!clicked) {
+    console.log('  ✗ 找不到「编辑元数据」按钮（本地开发应为 admin 角色）')
+    return false
+  }
+  await new Promise((r) => setTimeout(r, 600))
+
+  const r = await evaluate(client, EDITOR_PROBE)
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+
+  line('编辑按钮', r.hasEditButton ? '有' : '无')
+  line('面板已展开', r.hasEditor ? '是' : '否')
+  line('面板尺寸', r.editorBox ? `${r.editorBox.w}×${r.editorBox.h}` : '缺失')
+  line('面板边框色', r.editorBorderColor)
+  line('标题预填', r.titleValue ?? '（空）')
+  line('分类选项', `${r.catOptionCount} 个，已勾选 ${r.checkedCount} 个`)
+  line('选项尺寸/圆角', r.firstOptBox ? `${r.firstOptBox.w}×${r.firstOptBox.h} / ${r.firstOptRadius}` : '缺失')
+  line('选中项背景色', r.activeOptBg)
+  line('标签/摘要/可见性输入', `${r.hasTags ? '有' : '无'} / ${r.hasSummary ? '有' : '无'} / ${r.hasVisibility ? '有' : '无'}`)
+  line('保存/删除按钮', `${r.hasSave ? '有' : '无'} / ${r.hasDelete ? '有' : '无'}`)
+  line('删除按钮颜色', r.deleteColor)
+
+  const issues = []
+  if (!r.hasEditor) issues.push('编辑面板没渲染出来')
+  if (r.editorBox && r.editorBox.h < 200) issues.push(`面板高度异常（${r.editorBox.h}px）`)
+  if (r.catOptionCount < 9) issues.push(`分类选项只有 ${r.catOptionCount} 个`)
+  if (!r.hasTags || !r.hasSummary || !r.hasVisibility) issues.push('缺少部分输入控件')
+  if (!r.hasSave || !r.hasDelete) issues.push('缺少保存或删除按钮')
+  if (issues.length === 0) console.log('\n  ✓ 编辑面板布局与样式正常')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'editor')
+  console.log(`  截图已存 .shots/editor.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 
@@ -364,6 +455,7 @@ async function main() {
 
     if (pdf) ok = (await checkView(client, pdf.id, 'PDF 内嵌预览', 'view-pdf')) && ok
     if (other) ok = (await checkView(client, other.id, `${other.type.toUpperCase()} 预览`, `view-${other.type}`)) && ok
+    if (other) ok = (await checkEditor(client, other.id)) && ok
   } finally {
     try {
       client?.ws.close()

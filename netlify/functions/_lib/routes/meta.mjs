@@ -9,7 +9,7 @@
 
 import { checkAuth } from '../auth.mjs'
 import { ok, forbidden, unauthorized, serverError } from '../respond.mjs'
-import { readAllMeta, readIndex, readTaxonomy, tally } from '../repo.mjs'
+import { readAllMeta, readIndexMeta, readTaxonomy, tally } from '../repo.mjs'
 
 /**
  * 统一鉴权：三个 meta 端点要求一致。
@@ -88,8 +88,9 @@ export async function manifestRoute(req, url) {
     let docs = await readAllMeta()
     if (auth.role === 'guest') docs = docs.filter((d) => d.visibility === 'public')
 
-    const index = await readIndex()
-    const version = index?.version ?? 'none'
+    // 只读 meta（几 KB），不再为了版本号把整个索引拉下来
+    const indexMeta = await readIndexMeta()
+    const version = indexMeta?.version ?? 'none'
     const etag = `"${version}-${docs.length}"`
 
     // 内容未变 → 304
@@ -102,7 +103,7 @@ export async function manifestRoute(req, url) {
 
     const payload = {
       version,
-      builtAt: index?.builtAt ?? null,
+      builtAt: indexMeta?.builtAt ?? null,
       docCount: docs.length,
       docs: docs.map((d) => ({
         id: d.id,

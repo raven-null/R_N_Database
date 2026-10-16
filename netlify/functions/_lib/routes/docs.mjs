@@ -12,8 +12,10 @@ import {
   ok, badRequest, notFound, unauthorized, forbidden, serverError, content,
 } from '../respond.mjs'
 import {
-  readAllMeta, readMeta, readDocFile, readPreview, readDocText, tally,
+  readAllMeta, readMeta, readDocFile, readPreview, readDocText, readTaxonomy, tally,
 } from '../repo.mjs'
+import { applyDocChange } from '../index-store.mjs'
+import { getDocsStore, STORES } from '../store.mjs'
 
 /** 允许的排序方式。 */
 const SORTS = {
@@ -38,22 +40,39 @@ const MAX_LIMIT = 200
  * @returns {Promise<Response>} 响应
  */
 export async function docsRoute(req, url, seg) {
-  const auth = await checkAuth(req, url, 'read')
+  // 写操作必须是 admin：read 令牌给工作站和博客用，不该能改资料
+  const isWrite = req.method === 'PATCH' || req.method === 'DELETE' || req.method === 'POST'
+  const auth = await checkAuth(req, url, isWrite ? 'admin' : 'read')
+
   if (!auth.ok) {
     return auth.failClosed
       ? forbidden('服务端尚未配置访问密码，已拒绝所有访问（fail-closed）', { req })
       : unauthorized(describeAuthFailure(auth.reason), { req })
   }
+  if (isWrite && auth.role !== 'admin') {
+    return forbidden('修改资料需要管理员令牌', { req })
+  }
 
   try {
     // /api/v1/docs
-    if (seg.length === 0) return listDocs(req, url, auth)
+    if (seg.length === 0) {
+      if (req.method !== 'GET') return badRequest('列表接口只接受 GET', { req })
+      return listDocs(req, url, auth)
+    }
 
     const id = seg[0]
     const action = seg[1]
 
     // /api/v1/docs/{id}
-    if (!action) return detail(req, id, auth)
+    if (!action) {
+      if (req.method === 'PATCH') return updateDoc(req, id, auth)
+      if (req.method === 'DELETE') return removeDoc(req, id, auth)
+      if (req.method !== 'GET') return badRequest(`${req.method} 不支持`, { req })
+      return detail(req, id, auth)
+    }
+
+    if (req.method !== 'GET') return badRequest(`${req.method} 不支持`, { req })
+
     // /api/v1/docs/{id}/file
     if (action === 'file') return originalFile(req, url, id, auth)
     // /api/v1/docs/{id}/preview
@@ -65,6 +84,157 @@ export async function docsRoute(req, url, seg) {
   } catch (err) {
     return serverError(err, 'docs', { req })
   }
+}
+
+/* ============================================================
+   写操作
+   ============================================================ */
+
+/** 允许通过 API 修改的字段白名单。 */
+const EDITABLE = ['title', 'categories', 'tags', 'summary', 'visibility', 'author', 'docCreatedAt']
+
+/**
+ * PATCH /api/v1/docs/{id} —— 修改元数据。
+ *
+ * 只改元数据，不动原件与正文。索引走增量更新（只读改写受影响的分片），
+ * 不重建全库 —— 全量索引 256 份文档已 6.23MB，每次都重建不可接受。
+ *
+ * 人工编辑过的文档会清掉 needsReview：「待复查」的意思是"机器没把握，
+ * 等人确认"，人确认过了就该出队。
+ *
+ * @param {Request} req - 请求
+ * @param {string} id - 文档 id
+ * @param {object} auth - 鉴权结果
+ * @returns {Promise<Response>} 响应
+ */
+async function updateDoc(req, id, auth) {
+  const oldMeta = await readMeta(id)
+  if (!oldMeta) return notFound('文档不存在', { req })
+
+  let body
+  try {
+    body = await req.json()
+  } catch {
+    return badRequest('请求体不是合法 JSON', { req })
+  }
+
+  const patch = {}
+  for (const key of EDITABLE) {
+    if (body?.[key] !== undefined) patch[key] = body[key]
+  }
+  if (Object.keys(patch).length === 0) {
+    return badRequest(`没有可修改的字段。允许的字段：${EDITABLE.join(', ')}`, { req })
+  }
+
+  // 校验
+  const taxonomy = await readTaxonomy()
+  const validCats = new Set((taxonomy?.categories ?? []).map((c) => c.name))
+
+  if (patch.title !== undefined) {
+    const t = String(patch.title).trim()
+    if (!t) return badRequest('标题不能为空', { req })
+    patch.title = t.slice(0, 200)
+  }
+  if (patch.categories !== undefined) {
+    if (!Array.isArray(patch.categories)) return badRequest('categories 必须是数组', { req })
+    const cats = patch.categories.map((c) => String(c).trim()).filter(Boolean)
+    const bad = cats.filter((c) => !validCats.has(c))
+    if (bad.length) {
+      return badRequest(`分类必须来自词表，不认识：${bad.join('、')}`, { req })
+    }
+    patch.categories = [...new Set(cats)].slice(0, 3)
+    if (patch.categories.length === 0) patch.categories = ['未归类']
+  }
+  if (patch.tags !== undefined) {
+    if (!Array.isArray(patch.tags)) return badRequest('tags 必须是数组', { req })
+    patch.tags = [...new Set(patch.tags.map((t) => String(t).trim()).filter(Boolean))]
+      .map((t) => t.slice(0, 20)).slice(0, 12)
+  }
+  if (patch.summary !== undefined) patch.summary = String(patch.summary).slice(0, 600)
+  if (patch.visibility !== undefined) {
+    patch.visibility = patch.visibility === 'public' ? 'public' : 'private'
+  }
+
+  const now = new Date().toISOString()
+  const newMeta = {
+    ...oldMeta,
+    ...patch,
+    // 人工编辑过就不再是"待复查"
+    needsReview: false,
+    classifySource: oldMeta.classifySource === 'ai' || oldMeta.classifySource === 'rules'
+      ? `${oldMeta.classifySource}+manual`
+      : 'manual',
+    editedAt: now,
+    updatedAt: now,
+  }
+
+  const metaStore = await getDocsStore(STORES.META)
+  await metaStore.set(id, JSON.stringify(newMeta))
+
+  // 增量更新索引（标题/标签/分类/摘要都参与索引）
+  let indexResult = null
+  let indexError = null
+  try {
+    indexResult = await applyDocChange({ oldMeta, newMeta })
+  } catch (err) {
+    indexError = String(err?.message ?? err)
+  }
+
+  return ok({
+    doc: newMeta,
+    index: indexResult,
+    indexError,
+    note: indexError
+      ? '元数据已保存，但索引更新失败 —— 检索结果可能暂时不准，可在本地运行 node scripts/reindex.mjs 修复。'
+      : '元数据与索引均已更新。',
+  }, { req })
+}
+
+/**
+ * DELETE /api/v1/docs/{id} —— 删除文档（原件、预览件、正文、元数据、索引）。
+ *
+ * @param {Request} req - 请求
+ * @param {string} id - 文档 id
+ * @param {object} auth - 鉴权结果
+ * @returns {Promise<Response>} 响应
+ */
+async function removeDoc(req, id, auth) {
+  const meta = await readMeta(id)
+  if (!meta) return notFound('文档不存在', { req })
+
+  const filesStore = await getDocsStore(STORES.FILES)
+  const previewStore = await getDocsStore(STORES.PREVIEWS)
+  const textStore = await getDocsStore(STORES.TEXT)
+  const metaStore = await getDocsStore(STORES.META)
+
+  // 原件 key 带扩展名，按前缀找更稳妥
+  const listed = await filesStore.list({ prefix: `${id}.` }).catch(() => ({ blobs: [] }))
+  for (const blob of listed.blobs ?? []) {
+    await filesStore.delete(blob.key).catch(() => {})
+  }
+
+  await Promise.all([
+    filesStore.delete(id).catch(() => {}),
+    previewStore.delete(`${id}.html`).catch(() => {}),
+    previewStore.delete(`${id}.pdf`).catch(() => {}),
+    textStore.delete(id).catch(() => {}),
+    metaStore.delete(id).catch(() => {}),
+  ])
+
+  let indexResult = null
+  let indexError = null
+  try {
+    indexResult = await applyDocChange({ oldMeta: meta, newMeta: null })
+  } catch (err) {
+    indexError = String(err?.message ?? err)
+  }
+
+  return ok({
+    deleted: id,
+    title: meta.title,
+    index: indexResult,
+    indexError,
+  }, { req })
 }
 
 /**

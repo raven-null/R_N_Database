@@ -13,6 +13,7 @@
  */
 
 import { buildIndex } from '../../netlify/functions/_lib/tokenize.mjs'
+import { writeIndex } from '../../netlify/functions/_lib/index-store.mjs'
 import { getDocsStore, STORES } from '../../netlify/functions/_lib/store.mjs'
 
 /**
@@ -71,15 +72,9 @@ export async function rebuildStoreIndex(opts = {}) {
 
   const index = buildIndex(allMeta, (doc) => textCache.get(doc.id) ?? '')
 
-  await indexStore.set('search-index', JSON.stringify({
-    version: index.version,
-    builtAt: index.builtAt,
-    docCount: index.docCount,
-    termCount: index.termCount,
-    avgLength: index.avgLength,
-    postings: index.postings,
-    lengths: index.lengths,
-  }))
+  // 分片写入（meta + 128 个分片），并清理旧版单文件索引
+  const written = await writeIndex(index)
+  onProgress?.(`已写入 ${written.shards} 个索引分片`)
 
   if (taxonomy) {
     await indexStore.set('taxonomy', JSON.stringify(taxonomy))
