@@ -197,6 +197,14 @@ async function testListPage() {
   const stats = document.getElementById('stats')?.textContent ?? ''
   check(/\d+\s*份/.test(stats), `统计行：${stats}`)
 
+  // 顶栏鉴权区：只应有「退出」，不该再出现角色徽标
+  const authArea = document.getElementById('auth-area')
+  const authHtml = authArea?.innerHTML ?? ''
+  check(Boolean(authArea), '存在鉴权区')
+  check(!/class="who"/.test(authHtml), '不再显示角色徽标（admin 之类）')
+  check(/退出/.test(authHtml) || /登录/.test(authHtml),
+    `鉴权区是登录或退出入口：${authArea?.textContent?.trim()}`)
+
   // ---- 点分类切面 → 真的按该分类筛选 ----
   // 挑一个库里确实存在的分类（数量 >= 1），并断言渲染出的每一条都带这个分类
   const catCount = {}

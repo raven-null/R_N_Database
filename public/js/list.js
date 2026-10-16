@@ -288,8 +288,9 @@ async function renderAuth() {
   }
 
   if (status.authenticated) {
-    el.authArea.innerHTML = `<span class="who">${esc(status.role ?? '')}</span>
-      <button class="btn ghost" id="logout">退出</button>`
+    // 只留「退出」。之前还有个显示当前角色的 admin 徽标，
+    // 单人使用下它不提供任何可操作信息，纯占位。
+    el.authArea.innerHTML = `<button class="btn ghost" id="logout">退出</button>`
     document.getElementById('logout').addEventListener('click', () => {
       clearToken()
       clearManifestCache()

@@ -126,14 +126,6 @@ code, pre, .kbd-hint {
 
 .auth-area { display: flex; align-items: center; gap: 8px; }
 
-.who {
-  font-size: 12px;
-  color: var(--accent);
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  padding: 2px 9px;
-}
-
 /* ============================================================
    按钮
    ============================================================ */
