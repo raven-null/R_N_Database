@@ -8,13 +8,17 @@
  * @module public/js/list
  */
 
-import { loadManifest, searchDocs, clearManifestCache, ApiError } from './api.js'
+import { loadManifest, searchDocs, clearManifestCache, ApiError, fetchTaxonomy, apiFetch } from './api.js'
 import { fetchAuthStatus, login, setToken, clearToken, getToken } from './auth.js'
 import { esc, fmtSize, fmtDate, typeBadge, debounce, looksLikePinyin, matchesPinyin } from './util.js'
+import { mountSelect } from './select.js'
+import { mountUpload, renderPending } from './upload.js'
+import { openQuickTag, openTagManager } from './tags.js'
 
 /** 应用状态。 */
 const state = {
   manifest: null,
+  taxonomy: null,
   category: '',
   tag: '',
   type: '',
@@ -26,6 +30,9 @@ const state = {
   limit: 60,
   auth: null,
 }
+
+/** 多选控制器（main 里创建）。 */
+let sel = null
 
 const SORTERS = {
   recent: (a, b) => String(b.ingestedAt ?? '').localeCompare(String(a.ingestedAt ?? '')),
@@ -42,6 +49,10 @@ const el = {
   stats: document.getElementById('stats'),
   authArea: document.getElementById('auth-area'),
   banner: document.getElementById('banner'),
+  pending: document.getElementById('pending'),
+  selbar: document.getElementById('selbar'),
+  btnSelect: document.getElementById('btn-select'),
+  btnUpload: document.getElementById('btn-upload'),
 }
 
 /* ============================================================
@@ -137,14 +148,19 @@ function renderFacets(docs) {
       </div>
     </section>
 
-    ${tags.length ? `
     <section class="facet">
-      <h3>标签</h3>
+      <h3>标签 <button class="facet-act" id="btn-tags" title="重命名 / 合并 / 删除标签">管理</button></h3>
       <div class="chips">
-        ${tags.map(([name, n]) => chip(name, n, state.tag === name, `data-facet="tag" data-value="${esc(name)}"`)).join('')}
+        ${tags.length
+          ? tags.map(([name, n]) => chip(name, n, state.tag === name, `data-facet="tag" data-value="${esc(name)}"`)).join('')
+          : '<span class="dim">还没有标签</span>'}
       </div>
-    </section>` : ''}
+    </section>
   `
+
+  el.facets.querySelector('#btn-tags')?.addEventListener('click', () => {
+    openTagManager({ onChanged: () => refreshManifest() })
+  })
 
   el.facets.querySelectorAll('[data-facet]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -176,20 +192,27 @@ function docRow(doc) {
     fmtDate(doc.docCreatedAt || doc.ingestedAt),
   ].filter(Boolean)
 
+  const selecting = sel?.isActive()
+  const checked = selecting && sel.has(doc.id)
+
   return `
-    <a class="doc" href="/view.html?id=${encodeURIComponent(doc.id)}">
-      ${typeBadge(doc.type)}
-      <div class="doc-main">
-        <div class="doc-title">${esc(doc.title)}${doc.needsReview ? '<span class="flag">待复查</span>' : ''}</div>
-        ${doc.summary ? `<div class="doc-summary">${esc(doc.summary)}</div>` : ''}
-        <div class="doc-meta">
-          ${metaBits.map((b) => `<span>${b}</span>`).join('<i>·</i>')}
-          ${(doc.categories ?? []).length ? `<i>·</i><span class="cats">${doc.categories.map(esc).join(' / ')}</span>` : ''}
+    <div class="doc${checked ? ' picked' : ''}" data-id="${esc(doc.id)}">
+      ${selecting ? `<label class="doc-check"><input type="checkbox" data-check="${esc(doc.id)}"${checked ? ' checked' : ''}></label>` : ''}
+      <a class="doc-link" href="/view.html?id=${encodeURIComponent(doc.id)}">
+        ${typeBadge(doc.type)}
+        <div class="doc-main">
+          <div class="doc-title">${esc(doc.title)}${doc.needsReview ? '<span class="flag">待复查</span>' : ''}</div>
+          ${doc.summary ? `<div class="doc-summary">${esc(doc.summary)}</div>` : ''}
+          <div class="doc-meta">
+            ${metaBits.map((b) => `<span>${b}</span>`).join('<i>·</i>')}
+            ${(doc.categories ?? []).length ? `<i>·</i><span class="cats">${doc.categories.map(esc).join(' / ')}</span>` : ''}
+          </div>
+          ${tags ? `<div class="doc-tags">${tags}</div>` : ''}
         </div>
-        ${tags ? `<div class="doc-tags">${tags}</div>` : ''}
-      </div>
+      </a>
+      <button class="quick-tag" data-quick="${esc(doc.id)}" title="快速打标签">＋标签</button>
       <span class="go">打开 →</span>
-    </a>`
+    </div>`
 }
 
 /**
@@ -205,20 +228,76 @@ function renderDeepResults(result) {
 
   return `<div class="deep-note">全文检索「${esc(result.query)}」命中 ${result.total} 份（含正文）</div>`
     + result.items.map((it) => `
-      <a class="doc deep" href="/view.html?id=${encodeURIComponent(it.id)}${state.q ? `&q=${encodeURIComponent(state.q)}` : ''}">
-        ${typeBadge(it.type)}
-        <div class="doc-main">
-          <div class="doc-title">${esc(it.title)}</div>
-          ${it.snippet ? `<div class="doc-summary snippet">${esc(it.snippet)}</div>` : ''}
-          <div class="doc-meta">
-            <span>相关度 ${it.score}</span>
-            ${it.hitPage ? `<i>·</i><span>命中第 ${it.hitPage} 页</span>` : ''}
-            ${(it.categories ?? []).length ? `<i>·</i><span class="cats">${it.categories.map(esc).join(' / ')}</span>` : ''}
-            ${it.matched?.length ? `<i>·</i><span class="dim">命中词：${it.matched.map(esc).join(' ')}</span>` : ''}
+      <div class="doc deep" data-id="${esc(it.id)}">
+        <a class="doc-link" href="/view.html?id=${encodeURIComponent(it.id)}${state.q ? `&q=${encodeURIComponent(state.q)}` : ''}">
+          ${typeBadge(it.type)}
+          <div class="doc-main">
+            <div class="doc-title">${esc(it.title)}</div>
+            ${it.snippet ? `<div class="doc-summary snippet">${esc(it.snippet)}</div>` : ''}
+            <div class="doc-meta">
+              <span>相关度 ${it.score}</span>
+              ${it.hitPage ? `<i>·</i><span>命中第 ${it.hitPage} 页</span>` : ''}
+              ${(it.categories ?? []).length ? `<i>·</i><span class="cats">${it.categories.map(esc).join(' / ')}</span>` : ''}
+              ${it.matched?.length ? `<i>·</i><span class="dim">命中词：${it.matched.map(esc).join(' ')}</span>` : ''}
+            </div>
           </div>
-        </div>
-        <span class="go">打开 →</span>
-      </a>`).join('')
+          <span class="go">打开 →</span>
+        </a>
+      </div>`).join('')
+}
+
+/**
+ * 给渲染出来的卡片绑定交互。
+ *
+ * 每轮渲染后都要重新绑 —— innerHTML 会把旧节点连同监听器一起换掉。
+ * @param {object[]} docs - 本轮渲染的文档（用于快速打标签取元数据）
+ */
+function bindCards(docs) {
+  const byId = new Map(docs.map((d) => [d.id, d]))
+
+  el.results.querySelectorAll('[data-check]').forEach((cb) => {
+    cb.addEventListener('change', () => sel?.toggle(cb.dataset.check))
+  })
+
+  el.results.querySelectorAll('[data-quick]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const doc = byId.get(btn.dataset.quick)
+      if (!doc) return
+      openQuickTag(doc, btn, {
+        // 建议 = 词表里已有的标签，按使用频次排序，避免用户手打同义词
+        suggestions: (state.taxonomy?.tags ?? []).map((t) => t.name),
+        onChanged: () => refreshManifest(),
+      })
+    })
+  })
+
+  // 选择模式下点卡片 = 勾选，而不是打开
+  if (sel?.isActive()) {
+    el.results.querySelectorAll('.doc').forEach((card) => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.quick-tag') || e.target.closest('input')) return
+        e.preventDefault()
+        sel.toggle(card.dataset.id)
+      })
+    })
+  }
+}
+
+/**
+ * 重新拉清单并重画（元数据被改过之后）。
+ *
+ * 不整页刷新：批量打标签后连着改几轮都不该丢滚动位置与筛选条件。
+ * @returns {Promise<void>} 完成
+ */
+async function refreshManifest() {
+  try {
+    state.manifest = await loadManifest({ force: true })
+  } catch {
+    return
+  }
+  render()
 }
 
 /**
@@ -232,6 +311,7 @@ function render() {
 
   if (state.deep && state.deepResult) {
     el.results.innerHTML = renderDeepResults(state.deepResult)
+    bindCards(state.deepResult.items ?? [])
     el.stats.textContent = `全文检索 · ${state.deepResult.total} 条`
     return
   }
@@ -241,11 +321,12 @@ function render() {
   if (filtered.length === 0) {
     el.results.innerHTML = docs.length === 0
       ? `<div class="empty">资料库还是空的。<br>
-          <span class="dim">把文档放进 <code>inbox/</code>，然后运行：</span>
+          <span class="dim">点右上角「上传」传文件，或把文档放进 <code>inbox/</code> 后跑：</span>
           <pre class="cmd">node scripts/ingest.mjs</pre></div>`
       : `<div class="empty">没有符合当前筛选条件的文档。<br>
           <span class="dim">试试清空筛选条件。</span></div>`
     el.stats.textContent = `0 / ${docs.length} 份`
+    sel?.setVisible([])
     return
   }
 
@@ -254,6 +335,10 @@ function render() {
     + (filtered.length > shown.length
       ? `<button class="more" id="more">还有 ${filtered.length - shown.length} 份，点击加载更多</button>`
       : '')
+
+  // 告诉多选模块「本页可见的是哪些」，供「全选本页」用
+  sel?.setVisible(shown.map((d) => d.id))
+  bindCards(shown)
 
   el.stats.textContent = filtered.length === docs.length
     ? `${docs.length} 份文档`
@@ -353,6 +438,23 @@ async function runDeepSearch() {
 async function main() {
   await renderAuth()
 
+  // ---- 词表（「改分类」下拉与标签建议都要用）----
+  state.taxonomy = await fetchTaxonomy().catch(() => null)
+
+  // ---- 多选与批量操作 ----
+  sel = mountSelect({
+    bar: el.selbar,
+    taxonomy: state.taxonomy,
+    onChange: () => render(),
+  })
+
+  el.btnSelect.addEventListener('click', () => {
+    if (sel.isActive()) sel.exit()
+    else sel.enter()
+    el.btnSelect.classList.toggle('active', sel.isActive())
+    el.btnSelect.textContent = sel.isActive() ? '退出选择' : '选择'
+  })
+
   el.search.addEventListener('input', debounce(() => {
     state.q = el.search.value
     state.deep = false
@@ -380,6 +482,15 @@ async function main() {
     return
   }
 
+  // ---- 上传（两阶段的第一阶段：只把原件存进暂存区）----
+  mountUpload({
+    button: el.btnUpload,
+    dropZone: el.results.closest('.main') ?? el.results,
+    banner: el.banner,
+    onChange: () => renderPendingList(),
+  })
+  renderPendingList()
+
   try {
     state.manifest = await loadManifest()
   } catch (err) {
@@ -393,6 +504,16 @@ async function main() {
   }
 
   render()
+}
+
+/**
+ * 刷新右侧盒子顶部的待入库清单。
+ * @returns {Promise<void>} 完成
+ */
+async function renderPendingList() {
+  await renderPending(el.pending, {
+    onChange: () => { /* 移除后自己会重画 */ },
+  })
 }
 
 main()

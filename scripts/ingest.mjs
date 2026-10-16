@@ -26,6 +26,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, extname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { loadEnv, loadExtraEnv, requireEnv } from './env.mjs'
 import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, isJunkTitle, mimeOf } from './lib/extract.mjs'
@@ -190,15 +191,21 @@ function findLibreOffice() {
 /**
  * 处理单个文件：抽取 → 分类 → 写入。
  *
- * @param {string} filePath - 文件路径
+ * 导出给 `scripts/process-pending.mjs` 复用 —— 网页上传的文件最终也走
+ * 这同一条流水线，避免「命令行入库」与「网页上传入库」两套行为不一致。
+ *
+ * @param {string} filePath - 文件路径（真实磁盘路径，抽取器需要读它）
  * @param {object} ctx - { taxonomy, useAI, apiKey, force, dryRun, pathIndex }
+ * @param {object} [override] - { originalName, sourcePath }
+ *   网页上传时文件先落在临时目录、名字被清洗过，
+ *   用这两个字段把**真实文件名**与**来源标识**还原回元数据里
  * @returns {Promise<object>} 处理结果
  */
-async function ingestOne(filePath, ctx) {
+export async function ingestOne(filePath, ctx, override = {}) {
   const abs = resolve(filePath)
-  const type = detectType(abs)
-  const name = basename(abs)
-  const title = titleFromFilename(abs)
+  const type = detectType(override.originalName ?? abs)
+  const name = override.originalName ?? basename(abs)
+  const title = titleFromFilename(name)
 
   if (!type) return { status: 'skip', name, reason: '不支持的类型' }
 
@@ -210,8 +217,12 @@ async function ingestOne(filePath, ctx) {
   const buf = readFileSync(abs)
   const id = createHash('sha256').update(buf).digest('hex').slice(0, 12)
 
+  // 路径索引的键：上传来的文件用逻辑来源（upload://xxx），
+  // 这样同一份上传重复处理时能正确识别为「未变」而不是每次新增
+  const pathKey = override.sourcePath ?? abs
+
   // ---- 去重：同路径同内容 → 跳过；同路径不同内容 → 删旧迎新 ----
-  const prior = ctx.pathIndex[abs]
+  const prior = ctx.pathIndex[pathKey]
   if (prior && prior.id === id && !ctx.force) {
     return { status: 'unchanged', name, id }
   }
@@ -225,7 +236,7 @@ async function ingestOne(filePath, ctx) {
     const existing = await metaStore.get(id, { type: 'json' }).catch(() => null)
     if (existing) {
       if (!ctx.dryRun) {
-        ctx.pathIndex[abs] = { id, ingestedAt: existing.ingestedAt }
+        ctx.pathIndex[pathKey] = { id, ingestedAt: existing.ingestedAt }
       }
       return { status: 'duplicate', name, id, title: existing.title }
     }
@@ -318,8 +329,10 @@ async function ingestOne(filePath, ctx) {
     pages: extracted.pages ?? null,
     author: extracted.author || '',
     docCreatedAt: extracted.docCreatedAt ?? null,
-    sourcePath: abs,
-    sourceDir: relative(ROOT, abs).startsWith('..') ? resolve(abs, '..') : relative(ROOT, abs),
+    // 来源：网页上传的文件用 upload://<原名>（覆盖传入），
+    // 命令行扫描的用真实路径
+    sourcePath: override.sourcePath ?? abs,
+    sourceDir: override.sourcePath ?? (relative(ROOT, abs).startsWith('..') ? resolve(abs, '..') : relative(ROOT, abs)),
     fileModifiedAt: statSync(abs).mtime.toISOString(),
     ingestedAt: now,
     updatedAt: now,
@@ -349,7 +362,7 @@ async function ingestOne(filePath, ctx) {
     await textStore.set(id, JSON.stringify({ pages }))
   }
 
-  ctx.pathIndex[abs] = { id, ingestedAt: now }
+  ctx.pathIndex[pathKey] = { id, ingestedAt: now }
   ctx.ingested.push(meta)
 
   return {
@@ -425,7 +438,7 @@ async function main() {
         ? `启用 · ${ai.model} · ${ai.endpoint}\n             密钥来源 ${ai.source}`
         : '未配置密钥，将只用规则分类（可设 AI_API_KEY / ZHIPU_API_KEY）')
     : '已禁用（--no-ai）'}`)
-  console.log(`  LibreOffice ${libreOfficeStatus()}`)
+  console.log(`  Office 转换 ${officeEngineStatus()}`)
 
   // remote 模式必须凭据齐备，绝不静默退回本地
   if (resolveStoreMode() === 'remote' && !opts.dryRun) {
@@ -548,11 +561,51 @@ async function main() {
   console.log('')
 }
 
-main().catch((err) => {
-  console.error('\n入库失败：', err?.message ?? err)
-  if (err?.code === 'BLOBS_UNAVAILABLE' || err?.code === 'MISSING_ENV') {
-    console.error('\n提示：remote 模式需要 SITE_ID + NETLIFY_ACCESS_TOKEN。')
-    console.error('     若只想在本地试用，把 DOCS_STORE_MODE 设为 local（或不设，默认就是 local）。')
+/**
+ * 构造一份入库上下文（供其他脚本复用）。
+ *
+ * 关键点：`pathIndex` 必须是**真实的**路径索引，
+ * 否则上传件重复处理时会被当成新文件反复入库。
+ *
+ * @param {object} opts - { taxonomy, useAI, force, dryRun }
+ * @returns {Promise<object>} ctx
+ */
+export async function makeIngestContext(opts) {
+  return {
+    taxonomy: opts.taxonomy,
+    useAI: opts.useAI !== false,
+    apiKey: '',
+    force: Boolean(opts.force),
+    dryRun: Boolean(opts.dryRun),
+    pathIndex: await readPathIndex(),
+    ingested: [],
   }
-  process.exit(1)
-})
+}
+
+/* ============================================================
+   作为 CLI 运行
+   ============================================================
+   本文件既是被 process-pending.mjs 导入的模块，也是独立命令。
+   加这道守卫，被 import 时不会误跑 main()。
+   ============================================================ */
+
+const isEntryPoint = (() => {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return resolve(entry) === fileURLToPath(import.meta.url)
+  } catch {
+    return false
+  }
+})()
+
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error('\n入库失败：', err?.message ?? err)
+    if (err?.code === 'BLOBS_UNAVAILABLE' || err?.code === 'MISSING_ENV') {
+      console.error('\n提示：remote 模式需要 SITE_ID + NETLIFY_ACCESS_TOKEN。')
+      console.error('     若只想在本地试用，把 DOCS_STORE_MODE 设为 local（或不设，默认就是 local）。')
+    }
+    process.exit(1)
+  })
+}

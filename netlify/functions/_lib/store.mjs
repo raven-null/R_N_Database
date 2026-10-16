@@ -38,6 +38,15 @@ export const STORES = {
   INDEX: 'doc-index',
   /** 密码哈希 + 令牌表 —— 沿用图库 auth-config 做法 */
   AUTH: 'doc-auth',
+  /**
+   * 待处理的上传暂存区。
+   *
+   * 网页上传是**两阶段**的：文件先落到这里并标为 pending，
+   * 重活（抽正文、Office 转 PDF、分类打标）留到本地跑
+   * `node scripts/process-pending.mjs` —— 因为 Netlify 上既没有
+   * LibreOffice，也扛不住 300 页 PDF 的抽取。
+   */
+  INBOX: 'doc-inbox',
 }
 
 const LOCAL_DIR = join(process.cwd(), '.local-data')

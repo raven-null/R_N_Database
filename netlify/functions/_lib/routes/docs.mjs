@@ -104,6 +104,10 @@ export async function docsRoute(req, url, seg) {
 /** 允许通过 API 修改的字段白名单。 */
 const EDITABLE = ['title', 'categories', 'tags', 'summary', 'visibility', 'author', 'docCreatedAt']
 
+/** 标签长度与数量上限（与批量接口保持一致）。 */
+const MAX_TAG_LEN = 20
+const MAX_TAGS_PER_DOC = 12
+
 /**
  * PATCH /api/v1/docs/{id} —— 修改元数据。
  *
@@ -158,8 +162,16 @@ async function updateDoc(req, id, auth) {
   }
   if (patch.tags !== undefined) {
     if (!Array.isArray(patch.tags)) return badRequest('tags 必须是数组', { req })
-    patch.tags = [...new Set(patch.tags.map((t) => String(t).trim()).filter(Boolean))]
-      .map((t) => t.slice(0, 20)).slice(0, 12)
+    const tags = [...new Set(patch.tags.map((t) => String(t).trim()).filter(Boolean))]
+    // 过长报错而不是静默截断：截断会让用户看到的标签名和输入的对不上
+    const tooLong = tags.filter((t) => [...t].length > MAX_TAG_LEN)
+    if (tooLong.length) {
+      return badRequest(`标签过长（上限 ${MAX_TAG_LEN} 个字符）：${tooLong.join('、')}`, { req })
+    }
+    if (tags.length > MAX_TAGS_PER_DOC) {
+      return badRequest(`标签最多 ${MAX_TAGS_PER_DOC} 个（当前 ${tags.length} 个）`, { req })
+    }
+    patch.tags = tags
   }
   if (patch.summary !== undefined) patch.summary = String(patch.summary).slice(0, 600)
   if (patch.visibility !== undefined) {

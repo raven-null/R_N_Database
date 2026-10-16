@@ -22,56 +22,14 @@
 
 import { readFileSync } from 'node:fs'
 import { extname, basename } from 'node:path'
+// 类型识别统一走函数侧共享模块：上传接口与入库必须用同一套判断，
+// 否则会出现「传得上来但入不了库」这类不一致
+import { detectType, mimeOf, titleFromFilename } from '../../netlify/functions/_lib/file-types.mjs'
+
+export { detectType, mimeOf, titleFromFilename }
 
 /** 单份文档正文上限（字符）。307 页的书约 50 万字符，这个上限足够宽松。 */
 const MAX_TEXT_CHARS = 2_000_000
-
-/** 扩展名 → 规范化类型。 */
-const EXT_ALIASES = {
-  '.pdf': 'pdf',
-  '.docx': 'docx',
-  '.doc': 'doc-legacy',
-  '.xlsx': 'xlsx',
-  '.xls': 'xls-legacy',
-  '.pptx': 'pptx',
-  '.ppt': 'ppt-legacy',
-  '.md': 'md',
-  '.markdown': 'md',
-  '.txt': 'txt',
-  '.csv': 'csv',
-}
-
-/** 类型 → MIME。 */
-const MIME = {
-  pdf: 'application/pdf',
-  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  md: 'text/markdown; charset=utf-8',
-  txt: 'text/plain; charset=utf-8',
-  csv: 'text/csv; charset=utf-8',
-  'doc-legacy': 'application/msword',
-  'xls-legacy': 'application/vnd.ms-excel',
-  'ppt-legacy': 'application/vnd.ms-powerpoint',
-}
-
-/**
- * 识别文件类型。
- * @param {string} filePath - 文件路径
- * @returns {string|null} 规范化类型，或 null 表示不支持
- */
-export function detectType(filePath) {
-  return EXT_ALIASES[extname(filePath).toLowerCase()] ?? null
-}
-
-/**
- * 取 MIME 类型。
- * @param {string} type - 规范化类型
- * @returns {string} MIME
- */
-export function mimeOf(type) {
-  return MIME[type] ?? 'application/octet-stream'
-}
 
 /**
  * 判断该类型能否抽取正文。
@@ -102,16 +60,9 @@ function cleanText(raw) {
 }
 
 /**
- * 从文件名推一个兜底标题（去扩展名、去多余分隔符）。
- * @param {string} filePath - 文件路径
- * @returns {string} 标题
+ * 从文件名推一个兜底标题 —— 已由 _lib/file-types.mjs 在顶部统一导入并转出，
+ * 这里不再重复实现（上传接口用的是同一份逻辑）。
  */
-export function titleFromFilename(filePath) {
-  return basename(filePath)
-    .replace(/\.[^.]+$/, '')
-    .replace(/[_-]+/g, ' ')
-    .trim() || basename(filePath)
-}
 
 /**
  * 已知的垃圾内嵌标题（生成工具留下的无意义值）。

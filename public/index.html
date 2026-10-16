@@ -6,7 +6,7 @@
   <title>R_N 资料库</title>
   <!-- CSS/JS 带 ?v= 版本号：netlify.toml 对 /css/* /js/* 设了 immutable 长缓存，
        改版时必须同步改这里的 v 值，否则客户端拿不到新文件。 -->
-  <link rel="stylesheet" href="/css/style.css?v=0.5.0">
+  <link rel="stylesheet" href="/css/style.css?v=0.6.0">
 </head>
 <body class="list-page">
   <header class="topbar">
@@ -24,6 +24,11 @@
       <option value="size">按体积</option>
     </select>
 
+    <div class="topbar-actions">
+      <button class="btn ghost" id="btn-select" title="多选后可批量加标签、改分类">选择</button>
+      <button class="btn ghost" id="btn-upload" title="上传文件到暂存区">上传</button>
+    </div>
+
     <div id="auth-area" class="auth-area"></div>
   </header>
 
@@ -38,12 +43,16 @@
       <div class="list-head">
         <span id="stats" class="stats">加载中…</span>
       </div>
+      <div id="pending" class="pending"></div>
       <div id="results" class="results">
         <div class="empty">正在加载…</div>
       </div>
     </main>
   </div>
 
-  <script type="module" src="/js/list.js?v=0.5.0"></script>
+  <!-- 批量操作栏：底部浮出，仅在选择模式显示 -->
+  <div id="selbar" class="selbar" hidden></div>
+
+  <script type="module" src="/js/list.js?v=0.6.0"></script>
 </body>
 </html>

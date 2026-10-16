@@ -139,6 +139,119 @@ export async function writeIndex(index) {
 }
 
 /**
+ * 批量增量更新：多份文档的元数据同时变化。
+ *
+ * 与 `applyDocChange` 的区别：那个是「一份文档一次读写」。
+ * 批量打标签要改上百份，逐份调用会把同一批分片反复读改写上百次 ——
+ * 既慢又可能互相覆盖。这里一次性把受影响分片读进内存、改完再写回一次。
+ *
+ * @param {Array<{oldMeta:object, newMeta:object|null}>} changes - 变更列表；newMeta 为 null 表示删除
+ * @returns {Promise<{ok:boolean, version:string, shardsTouched:number, docCount:number, applied:number}>} 结果
+ */
+export async function applyDocChangesBulk(changes) {
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return { ok: true, version: null, shardsTouched: 0, docCount: 0, applied: 0 }
+  }
+
+  const store = await getDocsStore(STORES.INDEX)
+  const textStore = await getDocsStore(STORES.TEXT)
+
+  const meta = await readIndexMeta()
+  if (!meta) throw new Error('索引尚未初始化，请先运行 node scripts/reindex.mjs')
+
+  const docs = (await store.get('docs', { type: 'json' })) ?? []
+  const docById = new Map(docs.map((d) => [d.id, d]))
+
+  // ---- 第 1 遍：算出每份文档的旧/新词频，收集要触碰的分片 ----
+  /** @type {Array<{id:string, oldTf:Map<string,number>, newTf:Map<string,number>, newMeta:object|null}>} */
+  const work = []
+  const touched = new Set()
+
+  for (const { oldMeta, newMeta } of changes) {
+    const id = (newMeta ?? oldMeta)?.id
+    if (!id) continue
+
+    // 正文不变（元数据编辑不碰正文），读一次即可
+    const text = await textStore.get(id, { type: 'json' }).catch(() => null)
+    const body = (text?.pages ?? []).join('\n')
+
+    const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), body) : new Map()
+    const newTf = newMeta ? termCounts(metaTextOf(newMeta), body) : new Map()
+
+    for (const t of oldTf.keys()) touched.add(shardOf(t))
+    for (const t of newTf.keys()) touched.add(shardOf(t))
+
+    work.push({ id, oldTf, newTf, newMeta })
+  }
+
+  // ---- 第 2 遍：一次性读入全部受影响分片 ----
+  const shardBuf = new Map()
+  await Promise.all([...touched].map(async (i) => {
+    const shard = await store.get(shardKey(i), { type: 'json' }).catch(() => null)
+    shardBuf.set(i, shard && typeof shard === 'object' ? shard : {})
+  }))
+
+  // ---- 第 3 遍：在内存里应用全部变更 ----
+  const nextLengths = { ...(meta.lengths ?? {}) }
+  const nextDocs = [...docs]
+  const indexOf = new Map(nextDocs.map((d, i) => [d.id, i]))
+
+  for (const { id, oldTf, newTf, newMeta } of work) {
+    removeDocFromShards(shardBuf, id, oldTf)
+
+    if (newMeta) {
+      const docLen = addDocToShards(shardBuf, id, newTf)
+      nextLengths[id] = docLen
+      const at = indexOf.get(id)
+      if (at === undefined) {
+        indexOf.set(id, nextDocs.length)
+        nextDocs.push(newMeta)
+      } else {
+        nextDocs[at] = newMeta
+      }
+    } else {
+      delete nextLengths[id]
+      const at = indexOf.get(id)
+      if (at !== undefined) {
+        nextDocs.splice(at, 1)
+        // splice 后索引整体前移，重建映射（批量删除不常见，成本可接受）
+        indexOf.clear()
+        nextDocs.forEach((d, i) => indexOf.set(d.id, i))
+      }
+    }
+  }
+
+  const total = Object.values(nextLengths).reduce((a, b) => a + b, 0)
+  const docCount = nextDocs.length
+
+  const nextMeta = {
+    ...meta,
+    version: computeIndexVersion(nextDocs),
+    builtAt: new Date().toISOString(),
+    docCount,
+    avgLength: docCount > 0 ? total / docCount : 0,
+    lengths: nextLengths,
+  }
+
+  // ---- 第 4 遍：只写回受影响的分片 ----
+  await Promise.all([...shardBuf.entries()].map(([i, shard]) =>
+    store.set(shardKey(i), JSON.stringify(shard))))
+
+  await store.set(META_KEY, JSON.stringify(nextMeta))
+  await store.set('docs', JSON.stringify(nextDocs))
+
+  void docById
+
+  return {
+    ok: true,
+    version: nextMeta.version,
+    shardsTouched: shardBuf.size,
+    docCount,
+    applied: work.length,
+  }
+}
+
+/**
  * 把一份文档加入索引（内部用）。
  * @param {Map<number, object>} shardBuf - 分片缓冲
  * @param {string} id - 文档 id

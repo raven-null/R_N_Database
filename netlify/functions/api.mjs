@@ -21,6 +21,8 @@ import { docsRoute } from './_lib/routes/docs.mjs'
 import { searchRoute } from './_lib/routes/search.mjs'
 import { taxonomyRoute, manifestRoute } from './_lib/routes/meta.mjs'
 import { authRoute } from './_lib/routes/auth.mjs'
+import { batchRoute, tagRenameRoute, tagDeleteRoute, tagStatsRoute } from './_lib/routes/docs-batch.mjs'
+import { inboxRoute } from './_lib/routes/inbox.mjs'
 import { notFound, preflight, serverError } from './_lib/respond.mjs'
 
 /** API 前缀。 */
@@ -57,8 +59,24 @@ export default async (req) => {
     switch (seg[0]) {
       case 'health':
         return await healthRoute(req, url)
+
       case 'docs':
+        // /docs/batch 是集合级操作，必须抢在 /docs/{id} 之前判断，
+        // 否则「batch」会被当成文档 id
+        if (seg[1] === 'batch') return await batchRoute(req, url)
         return await docsRoute(req, url, seg.slice(1))
+
+      case 'tags':
+        // /tags            标签统计
+        // /tags/rename     重命名 / 合并
+        // /tags/{name}     全库删除
+        if (seg.length === 1) return await tagStatsRoute(req, url)
+        if (seg[1] === 'rename') return await tagRenameRoute(req, url)
+        return await tagDeleteRoute(req, url, seg[1])
+
+      case 'inbox':
+        return await inboxRoute(req, url, seg.slice(1))
+
       case 'search':
         return await searchRoute(req, url)
       case 'taxonomy':

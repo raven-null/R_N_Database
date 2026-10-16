@@ -597,6 +597,136 @@ async function checkMarkdown(client, id, title) {
   return issues.length === 0
 }
 
+/**
+ * 检查上传 / 多选 / 标签管理这三块新 UI 的真实渲染与交互。
+ * @param {object} client - CDP 客户端
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkTools(client) {
+  console.log('\n【上传 / 多选 / 标签管理】')
+  await openPage(client, `${BASE}/`)
+  await new Promise((r) => setTimeout(r, 900))
+
+  const issues = []
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+
+  const probe = `(() => {
+    const box = (sel) => {
+      const el = document.querySelector(sel)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { w: Math.round(r.width), h: Math.round(r.height) }
+    }
+    return {
+      hasUpload: !!document.getElementById('btn-upload'),
+      hasSelect: !!document.getElementById('btn-select'),
+      hasTagAdmin: !!document.getElementById('btn-tags'),
+      uploadBox: box('#btn-upload'),
+      quickTagCount: document.querySelectorAll('.quick-tag').length,
+      selbarHidden: document.getElementById('selbar')?.hasAttribute('hidden'),
+      checkCount: document.querySelectorAll('.doc-check').length,
+      docLinkCount: document.querySelectorAll('.doc-link').length,
+      docCount: document.querySelectorAll('.doc').length,
+    }
+  })()`
+
+  const r = await evaluate(client, probe)
+  line('上传按钮', r.hasUpload ? `${r.uploadBox?.w}×${r.uploadBox?.h}` : '缺失')
+  line('选择按钮', r.hasSelect ? '有' : '缺失')
+  line('标签管理入口', r.hasTagAdmin ? '有' : '缺失')
+  line('卡片可点区域', `${r.docLinkCount} 个 .doc-link / ${r.docCount} 张卡片`)
+  line('快速打标签按钮', `${r.quickTagCount} 个`)
+  line('批量操作栏', r.selbarHidden ? '默认隐藏 ✓' : '★ 默认显示了')
+
+  if (!r.hasUpload) issues.push('缺少上传按钮')
+  if (!r.hasSelect) issues.push('缺少选择按钮')
+  if (!r.hasTagAdmin) issues.push('缺少标签管理入口')
+  if (r.docCount > 0 && r.docLinkCount !== r.docCount) {
+    issues.push(`可点区域数(${r.docLinkCount})与卡片数(${r.docCount})不一致 —— 卡片结构可能坏了`)
+  }
+  if (r.quickTagCount !== r.docCount) issues.push('不是每张卡片都有快速打标签按钮')
+  if (!r.selbarHidden) issues.push('批量操作栏应当默认隐藏')
+
+  // ---- 进入选择模式：出现勾选框、操作栏弹出 ----
+  await evaluate(client, `document.getElementById('btn-select')?.click()`)
+  await new Promise((rr) => setTimeout(rr, 400))
+  const sel = await evaluate(client, probe)
+  line('进入选择模式后', `勾选框 ${sel.checkCount} 个 / 操作栏${sel.selbarHidden ? '仍隐藏 ✗' : '已弹出 ✓'}`)
+  if (sel.checkCount !== sel.docCount) issues.push('选择模式下每张卡片都应有勾选框')
+  if (sel.selbarHidden) issues.push('进入选择模式后操作栏没有出现')
+
+  // 勾一个，看计数是否变化
+  await evaluate(client, `document.querySelector('.doc-check input')?.click()`)
+  await new Promise((rr) => setTimeout(rr, 350))
+  const picked = await evaluate(client, `(() => ({
+    count: document.querySelector('.selbar-count')?.textContent?.trim() ?? '',
+    actions: [...document.querySelectorAll('.selbar-actions .btn')].map(b => b.textContent.trim()),
+    hasPanel: !!document.querySelector('.selbar-panel'),
+  }))()`)
+  line('勾选一份后', picked.count)
+  line('批量动作', picked.actions.join(' / '))
+  if (!/1/.test(picked.count)) issues.push(`勾选计数不对：${picked.count}`)
+  if (picked.actions.length < 5) issues.push(`批量动作太少：${picked.actions.join('/')}`)
+
+  // 点「加标签」应弹出输入面板
+  await evaluate(client, `[...document.querySelectorAll('.selbar-actions .btn')].find(b => b.textContent.includes('加标签'))?.click()`)
+  await new Promise((rr) => setTimeout(rr, 350))
+  const panel = await evaluate(client, `(() => ({
+    hasInput: !!document.getElementById('selbar-tags'),
+    box: (() => { const el = document.querySelector('.selbar-panel'); if (!el) return null; const r = el.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) } })(),
+  }))()`)
+  line('「加标签」面板', panel.hasInput ? `已展开 ${panel.box?.w}×${panel.box?.h}` : '★ 没展开')
+  if (!panel.hasInput) issues.push('点「加标签」没有出现输入框')
+
+  const bytes = await screenshot(client, 'tools-selbar')
+  console.log(`  截图已存 .shots/tools-selbar.png（${(bytes / 1024).toFixed(1)}KB）`)
+
+  // 退出选择模式
+  await evaluate(client, `[...document.querySelectorAll('.selbar-actions, .selbar-inner')].flatMap(e => [...e.querySelectorAll('.btn')]).find(b => b.textContent.includes('退出选择'))?.click()`)
+  await new Promise((rr) => setTimeout(rr, 350))
+
+  // ---- 快速打标签浮层 ----
+  await evaluate(client, `document.querySelector('.quick-tag')?.click()`)
+  await new Promise((rr) => setTimeout(rr, 400))
+  const pop = await evaluate(client, `(() => {
+    const el = document.querySelector('.popover')
+    if (!el) return { open: false }
+    const r = el.getBoundingClientRect()
+    return { open: true, w: Math.round(r.width), h: Math.round(r.height), hasInput: !!document.getElementById('qt-input') }
+  })()`)
+  line('快速打标签浮层', pop.open ? `${pop.w}×${pop.h}，输入框${pop.hasInput ? '有' : '无'}` : '★ 没弹出')
+  if (!pop.open) issues.push('点「＋标签」没有弹出浮层')
+  if (pop.open && !pop.hasInput) issues.push('浮层里没有输入框')
+  await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`)
+  await new Promise((rr) => setTimeout(rr, 250))
+
+  // ---- 标签管理面板 ----
+  await evaluate(client, `document.getElementById('btn-tags')?.click()`)
+  await new Promise((rr) => setTimeout(rr, 900))
+  const modal = await evaluate(client, `(() => {
+    const el = document.querySelector('.modal')
+    if (!el) return { open: false }
+    const r = el.getBoundingClientRect()
+    return {
+      open: true, w: Math.round(r.width), h: Math.round(r.height),
+      rows: document.querySelectorAll('.tag-table tbody tr').length,
+      ops: [...document.querySelectorAll('.tag-ops .btn')].slice(0, 3).map(b => b.textContent.trim()),
+    }
+  })()`)
+  line('标签管理面板', modal.open ? `${modal.w}×${modal.h}，${modal.rows} 行` : '★ 没弹出')
+  line('每行操作', modal.ops?.join(' / ') ?? '-')
+  if (!modal.open) issues.push('点「管理」没有弹出标签面板')
+  if (modal.open && modal.rows < 1) issues.push('标签面板没有数据行')
+  if (modal.open && !modal.ops?.includes('重命名')) issues.push('标签面板缺少重命名操作')
+
+  const bytes2 = await screenshot(client, 'tools-tagmodal')
+  console.log(`  截图已存 .shots/tools-tagmodal.png（${(bytes2 / 1024).toFixed(1)}KB）`)
+
+  if (issues.length === 0) console.log('\n  ✓ 新 UI 渲染与交互正常')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+  return issues.length === 0
+}
+
 /* ============================================================
    主流程
    ============================================================ */
@@ -648,6 +778,9 @@ async function main() {
     // Markdown 双视图
     const md = list.data.items.find((d) => d.type === 'md')
     if (md) ok = (await checkMarkdown(client, md.id, md.title)) && ok
+
+    // 上传 / 多选 / 标签管理
+    ok = (await checkTools(client)) && ok
 
     // Office 文档应当是 PDF 预览（装了 LibreOffice 的前提下）
     const office = list.data.items.find((d) => ['pptx', 'docx', 'xlsx'].includes(d.type))
