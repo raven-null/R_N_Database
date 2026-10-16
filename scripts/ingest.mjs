@@ -32,6 +32,7 @@ import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, 
 import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
+import { convertToPdf, findLibreOffice as findSoffice, libreOfficeStatus } from './lib/office.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
@@ -175,49 +176,11 @@ async function deleteDoc(id) {
    ============================================================ */
 
 /**
- * 探测 LibreOffice 可执行文件。
+ * 探测 LibreOffice（转 Office 文档用），委托给共享模块。
  * @returns {string|null} 路径或 null
  */
 function findLibreOffice() {
-  const candidates = process.platform === 'win32'
-    ? [
-        'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
-        'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
-      ]
-    : ['/usr/bin/soffice', '/usr/local/bin/soffice',
-       '/Applications/LibreOffice.app/Contents/MacOS/soffice']
-  return candidates.find((p) => existsSync(p)) ?? null
-}
-
-/**
- * 用 LibreOffice 无头模式把 Office 文档转成 PDF。
- *
- * 未安装 LibreOffice 时返回 null，调用方回退到 HTML 预览。
- * 这是保真度最高的路径（PPT 复杂排版也能还原），因此强烈建议安装。
- *
- * @param {string} filePath - 源文件
- * @param {string} outDir - 输出目录
- * @returns {Promise<Buffer|null>} PDF 内容或 null
- */
-async function convertToPdf(filePath, outDir) {
-  const soffice = findLibreOffice()
-  if (!soffice) return null
-
-  const { execFile } = await import('node:child_process')
-  const { promisify } = await import('node:util')
-  const run = promisify(execFile)
-
-  try {
-    await run(soffice, [
-      '--headless', '--norestore', '--invisible',
-      '--convert-to', 'pdf', '--outdir', outDir, filePath,
-    ], { timeout: 120000, windowsHide: true })
-
-    const expected = join(outDir, basename(filePath).replace(/\.[^.]+$/, '.pdf'))
-    return existsSync(expected) ? readFileSync(expected) : null
-  } catch {
-    return null
-  }
+  return findSoffice()
 }
 
 /* ============================================================
@@ -304,26 +267,20 @@ async function ingestOne(filePath, ctx) {
     // PDF 本身就是最好的预览件，不必再存一份副本
     previewKind = 'pdf'
   } else if (['docx', 'xlsx', 'pptx'].includes(type)) {
-    const { mkdtempSync, rmSync } = await import('node:fs')
-    const { tmpdir } = await import('node:os')
-    let tmp = null
-    try {
-      tmp = mkdtempSync(join(tmpdir(), 'rndb-'))
-      const pdf = await convertToPdf(abs, tmp)
-      if (pdf) {
-        await previewStore.set(`${id}.pdf`, pdf)
-        previewKind = 'pdf'
-        previewNote = 'LibreOffice 转换'
-      }
-    } finally {
-      if (tmp) rmSync(tmp, { recursive: true, force: true })
-    }
-    if (previewKind !== 'pdf') {
-      if (extracted.html) {
-        await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, extracted.title || title))
-        previewKind = 'html'
-        previewNote = 'HTML 降级（未安装 LibreOffice）'
-      }
+    // 优先走 LibreOffice 转 PDF（版式/图片/图表全部保留）；
+    // 未安装或转换失败才回退 HTML 降级。
+    // 先前实测：一份 21 页 PPT 走降级后只剩一堆 <li>，图片与排版全丢。
+    const pdf = await convertToPdf(abs)
+    if (pdf) {
+      await previewStore.set(`${id}.pdf`, pdf)
+      previewKind = 'pdf'
+      previewNote = 'LibreOffice 转换'
+    } else if (extracted.html) {
+      await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, finalTitle))
+      previewKind = 'html'
+      previewNote = findLibreOffice()
+        ? 'HTML 降级（LibreOffice 转换失败）'
+        : 'HTML 降级（未安装 LibreOffice，版式会丢失）'
     }
   } else if (type === 'md') {
     // Markdown 双视图：渲染件在入库时生成并缓存；
@@ -469,7 +426,7 @@ async function main() {
         ? `启用 · ${ai.model} · ${ai.endpoint}\n             密钥来源 ${ai.source}`
         : '未配置密钥，将只用规则分类（可设 AI_API_KEY / ZHIPU_API_KEY）')
     : '已禁用（--no-ai）'}`)
-  console.log(`  LibreOffice ${findLibreOffice() ? '已安装（Office 转高保真 PDF）' : '未安装（Office 走 HTML 降级预览）'}`)
+  console.log(`  LibreOffice ${libreOfficeStatus()}`)
 
   // remote 模式必须凭据齐备，绝不静默退回本地
   if (resolveStoreMode() === 'remote' && !opts.dryRun) {

@@ -319,9 +319,9 @@ async function testViewPage() {
     dom.window.close()
   }
 
-  // ---- PPTX：HTML 降级预览 ----
+  // ---- PPTX：预览方式取决于是否装了 LibreOffice，按实际 previewKind 断言 ----
   if (!pptx) {
-    check(false, '库里没有 PPTX 文档，跳过降级预览测试')
+    check(false, '库里没有 PPTX 文档，跳过该测试')
   } else {
     const { dom, errors } = makeDom(`view.html?id=${pptx.id}`)
     const { document } = dom.window
@@ -329,12 +329,24 @@ async function testViewPage() {
 
     await waitFor(() => document.getElementById('doc-title')?.textContent !== '加载中…')
 
-    check(Boolean(document.querySelector('iframe.html')), 'PPTX：挂上了 HTML 预览 iframe')
+    // 装了 LibreOffice → 转出 PDF（高保真）；没装 → HTML 降级
+    const wantCls = pptx.previewKind === 'pdf' ? 'pdf' : 'html'
+    const frame = document.querySelector(`iframe.${wantCls}`)
+    check(
+      Boolean(frame),
+      `PPTX：previewKind=${pptx.previewKind} → 挂上了 iframe.${wantCls}`,
+      `实际 iframe: ${document.querySelector('#frame iframe')?.className ?? '无'}`,
+    )
 
     const notice = document.getElementById('notice')?.textContent ?? ''
     check(
-      notice.includes('HTML 降级') || notice.includes('LibreOffice'),
+      notice.includes('LibreOffice') || notice.includes('HTML 降级') || notice.includes('渲染'),
       `PPTX：提示了预览件来源：${notice.slice(0, 90)}`,
+    )
+    // 只有 Markdown 才该带 mode 参数
+    check(
+      !(frame?.getAttribute('src') ?? '').includes('mode='),
+      'PPTX：非 Markdown，预览地址不带 mode 参数',
     )
 
     check(errors.length === 0, 'PPTX：无 jsdom 报错', errors.join('\n      '))

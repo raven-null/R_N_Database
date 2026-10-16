@@ -26,6 +26,7 @@ import { loadEnv } from './env.mjs'
 import { loadTaxonomy, classify, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
+import { convertBytesToPdf, OFFICE_TYPES, libreOfficeStatus } from './lib/office.mjs'
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 
@@ -125,7 +126,8 @@ async function main() {
   if (opts.pinyinOnly) {
     console.log(`  模式       仅补拼音（不改分类、不调 AI）`)
   } else if (opts.previewsOnly) {
-    console.log(`  模式       仅重建预览件（Markdown 渲染件等；不改分类、不调 AI）`)
+    console.log(`  模式       仅重建预览件（Markdown 渲染件 / Office 转 PDF）`)
+    console.log(`  LibreOffice ${libreOfficeStatus()}`)
   }
   console.log(`  ${all.length} 份文档，本次处理 ${limited.length} 份${opts.dryRun ? '（dry-run）' : ''}`)
   if (manualCount > 0 && !opts.pinyinOnly) {
@@ -141,6 +143,7 @@ async function main() {
   let added = 0
   let rebuilt = 0
   let missing = 0
+  let failed = 0
 
   for (const doc of limited) {
     // ---- 仅补拼音模式：只更新派生字段，完全不碰分类与标签 ----
@@ -162,27 +165,44 @@ async function main() {
 
     // ---- 仅重建预览件模式 ----
     if (opts.previewsOnly) {
-      if (doc.type === 'md') {
+      const buf = await filesStore.get(`${doc.id}.${doc.ext}`, { type: 'arrayBuffer' }).catch(() => null)
+
+      if (!buf) {
+        missing += 1
+      } else if (doc.type === 'md') {
         // ★ 用**原件字节**渲染，而不是抽取的正文：
         // 抽取时 cleanText 会压缩空格、去掉行首缩进、合并空行，
         // 那会让围栏代码块与列表层级在渲染视图里失真。
-        const buf = await filesStore.get(`${doc.id}.${doc.ext}`, { type: 'arrayBuffer' }).catch(() => null)
-        if (buf) {
-          const rendered = renderMarkdownPage(Buffer.from(buf).toString('utf8'), doc.title)
-          await previewStore.set(`${doc.id}.html`, rendered.html)
+        const rendered = renderMarkdownPage(Buffer.from(buf).toString('utf8'), doc.title)
+        await previewStore.set(`${doc.id}.html`, rendered.html)
+        await metaStore.set(doc.id, JSON.stringify({
+          ...doc,
+          previewKind: 'markdown',
+          previewNote: rendered.ok ? '' : `渲染失败，已回退为纯文本：${rendered.error}`,
+          updatedAt: new Date().toISOString(),
+        }))
+        rebuilt += 1
+      } else if (OFFICE_TYPES.has(doc.type)) {
+        // Office 文档：用 LibreOffice 转 PDF（版式/图片/图表全保留）。
+        // 这是安装 LibreOffice 后把已有文档升级为高保真预览的路径，
+        // 不必重新抽取正文 —— 正文本来就没变。
+        const pdf = await convertBytesToPdf(buf, doc.ext)
+        if (pdf) {
+          await previewStore.set(`${doc.id}.pdf`, pdf)
           await metaStore.set(doc.id, JSON.stringify({
             ...doc,
-            previewKind: 'markdown',
-            previewNote: rendered.ok ? '' : `渲染失败，已回退为纯文本：${rendered.error}`,
+            previewKind: 'pdf',
+            previewNote: 'LibreOffice 转换',
             updatedAt: new Date().toISOString(),
           }))
           rebuilt += 1
         } else {
-          missing += 1
+          failed += 1
         }
       }
+
       processed += 1
-      if (processed % 50 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
+      if (processed % 10 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
       continue
     }
 
@@ -233,6 +253,7 @@ async function main() {
       console.log(`\n  处理完成：${processed} 份，其中 ${added} 份补上了拼音\n`)
     } else {
       console.log(`\n  处理完成：${processed} 份，重建预览件 ${rebuilt} 份`
+        + `${failed ? `，失败 ${failed} 份` : ''}`
         + `${missing ? `，${missing} 份原件缺失已跳过` : ''}\n`)
     }
     if (!opts.dryRun) {

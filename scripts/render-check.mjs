@@ -641,6 +641,41 @@ async function main() {
     // Markdown 双视图
     const md = list.data.items.find((d) => d.type === 'md')
     if (md) ok = (await checkMarkdown(client, md.id, md.title)) && ok
+
+    // Office 文档应当是 PDF 预览（装了 LibreOffice 的前提下）
+    const office = list.data.items.find((d) => ['pptx', 'docx', 'xlsx'].includes(d.type))
+    const soffice = ['C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+      'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+      '/usr/bin/soffice'].some((p) => existsSync(p))
+
+    if (office) {
+      console.log('\n【Office 文档预览保真度】')
+      console.log(`  文档 ${String(office.title).slice(0, 24)}（${office.type}）→ previewKind = ${office.previewKind}`)
+      console.log(`  LibreOffice ${soffice ? '已安装' : '未安装'}`)
+      if (soffice && office.previewKind !== 'pdf') {
+        console.log('  ✗ 装了 LibreOffice 却仍走 HTML 降级 —— 版式会丢失')
+        ok = false
+      } else if (soffice) {
+        console.log('  ✓ 走 PDF 高保真预览')
+        // ★ 必须先导航到这个文档，否则读到的是上一个检查残留的页面
+        await openPage(client, `${BASE}/view.html?id=${office.id}`)
+        await new Promise((r2) => setTimeout(r2, 1200))
+        const r = await evaluate(client, `(() => {
+          const f = document.querySelector('#frame iframe')
+          return { cls: f?.className ?? null, src: f?.getAttribute('src')?.slice(0, 55) ?? null }
+        })()`)
+        console.log(`  iframe ${r.cls} → ${r.src}…`)
+        if (r.cls !== 'pdf') {
+          console.log('  ✗ Office 文档没有用 PDF 渲染器')
+          ok = false
+        } else {
+          const bytes = await screenshot(client, 'view-office')
+          console.log(`  ✓ 用 PDF 渲染器打开，截图 .shots/view-office.png（${(bytes / 1024).toFixed(1)}KB）`)
+        }
+      } else {
+        console.log('  · 未装 LibreOffice，此处只报告不断言')
+      }
+    }
   } finally {
     try {
       client?.ws.close()

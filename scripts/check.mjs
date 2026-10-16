@@ -21,6 +21,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { findLibreOffice } from './lib/office.mjs'
 
 const ROOT = process.cwd()
 const FUNC_DIR = join(ROOT, 'netlify', 'functions')
@@ -198,17 +199,14 @@ function checkSecrets() {
    ⑤ 可选工具探测（不影响构建成败）
    ============================================================ */
 function checkOptionalTools() {
-  const candidates = [
-    'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
-    'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
-    '/usr/bin/soffice',
-    '/Applications/LibreOffice.app/Contents/MacOS/soffice',
-  ]
-  const found = candidates.find((p) => existsSync(p))
+  // 探测逻辑统一走 scripts/lib/office.mjs，避免候选路径在两处各写一份
+  const found = findLibreOffice()
   if (found) {
-    note(`LibreOffice 已安装：${found}（Office 文档可转高保真 PDF 预览）`)
+    note(`LibreOffice 已安装：${found}（Office 文档转高保真 PDF 预览）`)
   } else {
-    warn('未检测到 LibreOffice —— docx/xlsx/pptx 将走 HTML 降级预览，PPT 保真度会明显下降')
+    warn('未检测到 LibreOffice —— docx/xlsx/pptx 只能走 HTML 降级预览，'
+      + '版式/图片/图表会丢失（实测一份 21 页 PPT 只剩一堆 <li>）。'
+      + '装好后跑 node scripts/reclassify.mjs --previews-only 即可升级已有文档。')
   }
 }
 
