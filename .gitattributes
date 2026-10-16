@@ -1,0 +1,36 @@
+# ============================================================
+# 行尾统一
+#
+# 你在 Windows 开发、部署到 Linux 的 Netlify。不钉死行尾的话，
+# Git 会把文件以 CRLF 存进仓库，将来在 Linux 构建时可能出现
+# 脚本执行失败、校验脚本误判等问题。
+#
+# 规则：仓库内一律 LF，检出到 Windows 也保持 LF（避免两份内容）。
+# ============================================================
+
+* text=auto eol=lf
+
+# 明确按文本处理
+*.md    text eol=lf
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+
+# 二进制：不要做任何转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.zip   binary
+*.gz    binary
+*.docx  binary
+*.xlsx  binary
+*.pptx  binary

@@ -1,0 +1,20 @@
+{
+  "name": "r-n-database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "R_N 个人数据资料库：Netlify Blobs 存储 + 只读公用 API + AI 分类检索",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^8.2.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs",
+    "check": "node scripts/check.mjs",
+    "build": "node scripts/check.mjs",
+    "probe": "node scripts/probe.mjs",
+    "ingest": "node scripts/ingest.mjs"
+  }
+}

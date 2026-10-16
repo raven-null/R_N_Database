@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>R_N 资料库</title>
+  <!-- CSS/JS 带 ?v= 版本号：netlify.toml 里对 /css/* /js/* 做了 immutable 长缓存，
+       改版时必须同步改这里的 v 值，否则客户端拿不到新文件。 -->
+  <link rel="stylesheet" href="/css/style.css?v=0.1.0">
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <h1>R_N 资料库</h1>
+      <p class="sub">个人数据资料库 · 阶段 0 地基</p>
+    </header>
+
+    <section class="card">
+      <h2>系统自检</h2>
+      <p class="hint" id="status">正在探测…</p>
+      <div id="report"></div>
+    </section>
+
+    <section class="card">
+      <h2>后续规划</h2>
+      <ul class="plan">
+        <li><b>阶段 1</b> 入库流水线 + 列表页 + 阅读页 + 密码门禁</li>
+        <li><b>阶段 2</b> 公用 API 冻结 + 工作站 MCP 工具 + 博客资料页</li>
+        <li><b>阶段 3</b> AI 自动分类打标 + 全文检索 + 拼音搜索</li>
+        <li><b>阶段 4</b> 备份导出 + CI + 容量审计</li>
+      </ul>
+    </section>
+  </main>
+
+  <script type="module" src="/js/health.js?v=0.1.0"></script>
+</body>
+</html>
