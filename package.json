@@ -21,7 +21,8 @@
     "probe": "node scripts/probe.mjs",
     "ingest": "node scripts/ingest.mjs",
     "reindex": "node scripts/reindex.mjs",
-    "test:dom": "node scripts/dom-smoke-test.mjs"
+    "test:dom": "node scripts/dom-smoke-test.mjs",
+    "test:render": "node scripts/render-check.mjs"
   },
   "devDependencies": {
     "jsdom": "^30.1.3"
