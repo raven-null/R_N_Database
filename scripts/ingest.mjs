@@ -1,0 +1,572 @@
+/**
+ * 入库流水线 —— 整个项目的主体。
+ *
+ * 库是空的，所以「怎么把文件变成可检索的资料」才是核心，
+ * 网页只是这条流水线的显示器。
+ *
+ * 流程：
+ *   扫描 → SHA-256 去重 → 抽正文与元数据 → 分类打标
+ *        → 生成预览件 → 写 Blobs/本地存储 → 重建索引
+ *
+ * 上传方式：**本地直写存储，不走 HTTP 上传接口。**
+ * 图库项目评审记录过 base64 上传导致峰值内存放大到约 55MB（15MB 文件）
+ * 的问题；直写绕开函数体积限制与 base64 放大，且能批量跑。
+ * 因此本脚本在 remote 模式缺少凭据时**直接报错，不静默退回本地**。
+ *
+ * 用法：
+ *   node scripts/ingest.mjs                       # 扫描默认 inbox/
+ *   node scripts/ingest.mjs "E:\学习"             # 扫描指定目录
+ *   node scripts/ingest.mjs "E:\学习" --force      # 忽略去重，强制重入
+ *   node scripts/ingest.mjs --no-ai               # 跳过 AI，只用规则分类
+ *   node scripts/ingest.mjs --dry-run             # 只报告，不写入
+ *
+ * @module scripts/ingest
+ */
+
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { basename, extname, join, relative, resolve } from 'node:path'
+
+import { loadEnv, requireEnv } from './env.mjs'
+import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, isJunkTitle, mimeOf } from './lib/extract.mjs'
+import { classify, loadTaxonomy } from './lib/classify.mjs'
+// 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
+import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
+import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
+
+const ROOT = process.cwd()
+const TAXONOMY_FILE = join(ROOT, 'config', 'taxonomy.json')
+
+/** 单次入库处理的文件体积上限（300MB），防止误扫到大文件把内存打爆。 */
+const MAX_FILE_BYTES = 300 * 1024 * 1024
+
+/** 目录扫描时跳过的目录名。 */
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', '.local-data', '.netlify', '.pnpm-store', '.npm-cache',
+  'dist', 'build', 'target-build', 'dist-desktop', '$RECYCLE.BIN', 'System Volume Information',
+])
+
+/* ============================================================
+   参数解析
+   ============================================================ */
+
+/**
+ * 解析命令行参数。
+ * @returns {object} 选项
+ */
+function parseArgs() {
+  const args = process.argv.slice(2)
+  const paths = []
+  const opts = { force: false, useAI: true, dryRun: false, limit: 0 }
+
+  for (const arg of args) {
+    if (arg === '--force') opts.force = true
+    else if (arg === '--no-ai') opts.useAI = false
+    else if (arg === '--dry-run') opts.dryRun = true
+    else if (arg.startsWith('--limit=')) opts.limit = Number(arg.slice(8)) || 0
+    else if (arg.startsWith('-')) throw new Error(`未知参数：${arg}`)
+    else paths.push(arg)
+  }
+
+  if (paths.length === 0) paths.push(join(ROOT, 'inbox'))
+  return { paths, ...opts }
+}
+
+/* ============================================================
+   文件扫描
+   ============================================================ */
+
+/**
+ * 递归扫描目录，收集支持的文件。
+ * @param {string} dir - 目录或文件路径
+ * @param {number} [depth] - 当前深度
+ * @returns {string[]} 文件路径列表
+ */
+function scanFiles(dir, depth = 0) {
+  if (depth > 12) return []
+
+  let st
+  try {
+    st = statSync(dir)
+  } catch {
+    return []
+  }
+
+  if (st.isFile()) return detectType(dir) ? [dir] : []
+
+  const out = []
+  let entries
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+
+  for (const entry of entries) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue
+      out.push(...scanFiles(full, depth + 1))
+    } else if (entry.isFile()) {
+      if (detectType(full)) out.push(full)
+    }
+  }
+  return out
+}
+
+/* ============================================================
+   存储读写
+   ============================================================ */
+
+/** 各 store 句柄缓存。 */
+const storeCache = new Map()
+
+/**
+ * 取 store 句柄（带缓存）。
+ * @param {string} name - store 名
+ * @returns {Promise<object>} store
+ */
+async function store(name) {
+  if (!storeCache.has(name)) storeCache.set(name, await getDocsStore(name))
+  return storeCache.get(name)
+}
+
+/**
+ * 读取源路径 → 文档 id 的映射，用于识别「同一文件的新版本」。
+ * 写回由 rebuildStoreIndex 统一负责（它拿 pathIndex 一并落盘）。
+ * @returns {Promise<Record<string, {id:string, ingestedAt:string}>>} 映射
+ */
+async function readPathIndex() {
+  const s = await store(STORES.INDEX)
+  try {
+    return (await s.get('paths', { type: 'json' })) ?? {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 删除一份文档在所有 store 里的痕迹。
+ * @param {string} id - 文档 id
+ * @returns {Promise<void>} 完成
+ */
+async function deleteDoc(id) {
+  const [files, previews, text, meta] = await Promise.all([
+    store(STORES.FILES), store(STORES.PREVIEWS), store(STORES.TEXT), store(STORES.META),
+  ])
+  // 原件 key 带扩展名，需按前缀找
+  const listed = await files.list({ prefix: `${id}.` }).catch(() => ({ blobs: [] }))
+  for (const blob of listed.blobs ?? []) {
+    await files.delete(blob.key).catch(() => {})
+  }
+  await Promise.all([
+    files.delete(id).catch(() => {}),
+    previews.delete(`${id}.html`).catch(() => {}),
+    previews.delete(`${id}.pdf`).catch(() => {}),
+    text.delete(id).catch(() => {}),
+    meta.delete(id).catch(() => {}),
+  ])
+}
+
+/* ============================================================
+   预览件生成
+   ============================================================ */
+
+/**
+ * 探测 LibreOffice 可执行文件。
+ * @returns {string|null} 路径或 null
+ */
+function findLibreOffice() {
+  const candidates = process.platform === 'win32'
+    ? [
+        'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+        'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+      ]
+    : ['/usr/bin/soffice', '/usr/local/bin/soffice',
+       '/Applications/LibreOffice.app/Contents/MacOS/soffice']
+  return candidates.find((p) => existsSync(p)) ?? null
+}
+
+/**
+ * 用 LibreOffice 无头模式把 Office 文档转成 PDF。
+ *
+ * 未安装 LibreOffice 时返回 null，调用方回退到 HTML 预览。
+ * 这是保真度最高的路径（PPT 复杂排版也能还原），因此强烈建议安装。
+ *
+ * @param {string} filePath - 源文件
+ * @param {string} outDir - 输出目录
+ * @returns {Promise<Buffer|null>} PDF 内容或 null
+ */
+async function convertToPdf(filePath, outDir) {
+  const soffice = findLibreOffice()
+  if (!soffice) return null
+
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const run = promisify(execFile)
+
+  try {
+    await run(soffice, [
+      '--headless', '--norestore', '--invisible',
+      '--convert-to', 'pdf', '--outdir', outDir, filePath,
+    ], { timeout: 120000, windowsHide: true })
+
+    const expected = join(outDir, basename(filePath).replace(/\.[^.]+$/, '.pdf'))
+    return existsSync(expected) ? readFileSync(expected) : null
+  } catch {
+    return null
+  }
+}
+
+/* ============================================================
+   单文件处理
+   ============================================================ */
+
+/**
+ * 处理单个文件：抽取 → 分类 → 写入。
+ *
+ * @param {string} filePath - 文件路径
+ * @param {object} ctx - { taxonomy, useAI, apiKey, force, dryRun, pathIndex }
+ * @returns {Promise<object>} 处理结果
+ */
+async function ingestOne(filePath, ctx) {
+  const abs = resolve(filePath)
+  const type = detectType(abs)
+  const name = basename(abs)
+  const title = titleFromFilename(abs)
+
+  if (!type) return { status: 'skip', name, reason: '不支持的类型' }
+
+  const size = statSync(abs).size
+  if (size > MAX_FILE_BYTES) {
+    return { status: 'skip', name, reason: `文件过大（${(size / 1024 / 1024).toFixed(1)}MB）` }
+  }
+
+  const buf = readFileSync(abs)
+  const id = createHash('sha256').update(buf).digest('hex').slice(0, 12)
+
+  // ---- 去重：同路径同内容 → 跳过；同路径不同内容 → 删旧迎新 ----
+  const prior = ctx.pathIndex[abs]
+  if (prior && prior.id === id && !ctx.force) {
+    return { status: 'unchanged', name, id }
+  }
+  if (prior && prior.id !== id && !ctx.dryRun) {
+    await deleteDoc(prior.id)
+  }
+
+  // ---- 已经存在同样内容（换了个路径）→ 直接复用，不重复占用 ----
+  if (!ctx.force) {
+    const metaStore = await store(STORES.META)
+    const existing = await metaStore.get(id, { type: 'json' }).catch(() => null)
+    if (existing) {
+      if (!ctx.dryRun) {
+        ctx.pathIndex[abs] = { id, ingestedAt: existing.ingestedAt }
+      }
+      return { status: 'duplicate', name, id, title: existing.title }
+    }
+  }
+
+  if (ctx.dryRun) {
+    return { status: 'would-ingest', name, id, type, size }
+  }
+
+  // ---- 抽取 ----
+  const extracted = await extractFile(abs, type)
+
+  // ---- 分类打标 ----
+  // 关键：把**文件名**与内嵌标题一起送进分类器。
+  // 文件名往往含最有价值的线索（「简历」「发票」「合同」），
+  // 而内嵌标题常是垃圾值。只取内嵌标题会让分类失准
+  // （实测：一份简历因内嵌标题 about:blank 被误分到「项目文档」）。
+  const titleHints = [
+    title,                                                     // 来自文件名
+    isJunkTitle(extracted.title) ? '' : extracted.title,        // 内嵌标题（非垃圾才用）
+  ].filter(Boolean).join(' ')
+
+  const cls = await classify({
+    title: titleHints,
+    text: extracted.text,
+    taxonomy: ctx.taxonomy,
+    apiKey: ctx.useAI ? ctx.apiKey : '',
+    useAI: ctx.useAI,
+  })
+
+  // ---- 预览件 ----
+  let previewKind = 'none'
+  let previewNote = ''
+  const previewStore = await store(STORES.PREVIEWS)
+
+  if (type === 'pdf') {
+    // PDF 本身就是最好的预览件，不必再存一份副本
+    previewKind = 'pdf'
+  } else if (['docx', 'xlsx', 'pptx'].includes(type)) {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    let tmp = null
+    try {
+      tmp = mkdtempSync(join(tmpdir(), 'rndb-'))
+      const pdf = await convertToPdf(abs, tmp)
+      if (pdf) {
+        await previewStore.set(`${id}.pdf`, pdf)
+        previewKind = 'pdf'
+        previewNote = 'LibreOffice 转换'
+      }
+    } finally {
+      if (tmp) rmSync(tmp, { recursive: true, force: true })
+    }
+    if (previewKind !== 'pdf') {
+      if (extracted.html) {
+        await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, extracted.title || title))
+        previewKind = 'html'
+        previewNote = 'HTML 降级（未安装 LibreOffice）'
+      }
+    }
+  } else if (['md', 'txt', 'csv'].includes(type)) {
+    if (extracted.html) {
+      await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, extracted.title || title))
+      previewKind = 'html'
+    } else {
+      previewKind = 'text'
+    }
+  }
+
+  // ---- 写入 ----
+  const now = new Date().toISOString()
+  const meta = {
+    id,
+    sha256: createHash('sha256').update(buf).digest('hex'),
+    title: pickTitle(extracted.title, title),
+    embeddedTitle: extracted.title || '',
+    originalName: name,
+    ext: extname(abs).toLowerCase().replace('.', ''),
+    type,
+    mime: mimeOf(type),
+    size,
+    pages: extracted.pages ?? null,
+    author: extracted.author || '',
+    docCreatedAt: extracted.docCreatedAt ?? null,
+    sourcePath: abs,
+    sourceDir: relative(ROOT, abs).startsWith('..') ? resolve(abs, '..') : relative(ROOT, abs),
+    fileModifiedAt: statSync(abs).mtime.toISOString(),
+    ingestedAt: now,
+    updatedAt: now,
+    categories: cls.categories,
+    tags: cls.tags,
+    summary: cls.summary,
+    classifySource: cls.source,
+    needsReview: cls.needsReview,
+    aiError: cls.aiError,
+    hasText: Boolean(extracted.text),
+    textChars: extracted.text?.length ?? 0,
+    extractError: extracted.error,
+    previewKind,
+    previewNote,
+  }
+
+  const filesStore = await store(STORES.FILES)
+  const textStore = await store(STORES.TEXT)
+  const metaStore = await store(STORES.META)
+
+  await filesStore.set(`${id}.${meta.ext}`, buf)
+  await metaStore.set(id, JSON.stringify(meta))
+
+  if (extracted.text) {
+    // PDF 按页存，便于将来做「跳到命中页」；其他类型整篇存
+    const pages = extracted.pageTexts ?? [extracted.text]
+    await textStore.set(id, JSON.stringify({ pages }))
+  }
+
+  ctx.pathIndex[abs] = { id, ingestedAt: now }
+  ctx.ingested.push(meta)
+
+  return {
+    status: 'ingested',
+    name,
+    id,
+    title: meta.title,
+    categories: meta.categories,
+    tags: meta.tags,
+    previewKind,
+    previewNote,
+    textChars: meta.textChars,
+    needsReview: meta.needsReview,
+  }
+}
+
+/**
+ * 把抽取出的 HTML 片段包成完整预览页。
+ * @param {string} body - 正文 HTML
+ * @param {string} title - 标题
+ * @returns {string} 完整 HTML
+ */
+function wrapPreviewHtml(body, title) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeHtml(title)}</title>
+<style>
+  body { margin:0; padding:28px 32px; font:15px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+         color:#1a1d23; background:#fff; max-width:900px; }
+  h1,h2,h3 { line-height:1.35; }
+  .sheet-name { margin-top:28px; padding-bottom:6px; border-bottom:2px solid #e2e5ea; }
+  .sheet-table { border-collapse:collapse; width:100%; font-size:13.5px; margin:10px 0 24px; }
+  .sheet-table td { border:1px solid #e2e5ea; padding:5px 9px; vertical-align:top; }
+  .sheet-table tr:nth-child(even) td { background:#fafbfc; }
+  .slide { border:1px solid #e2e5ea; border-radius:10px; padding:16px 22px; margin:16px 0; }
+  .slide h3 { margin:0 0 10px; font-size:13px; color:#667085; font-weight:600; }
+  .slide ul { margin:0; padding-left:22px; }
+  .slide li { margin:4px 0; }
+  .empty-slide { color:#98a2b3; font-style:italic; margin:0; }
+  img { max-width:100%; height:auto; }
+  table { border-collapse:collapse; }
+  td,th { border:1px solid #e2e5ea; padding:5px 9px; }
+</style></head>
+<body>${body}</body></html>`
+}
+
+/**
+ * HTML 转义。
+ * @param {string} s - 原文
+ * @returns {string} 转义结果
+ */
+function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/* ============================================================
+   主流程
+   ============================================================ */
+
+async function main() {
+  const env = loadEnv()
+  const opts = parseArgs()
+
+  console.log('▸ R_N_Database 入库\n')
+  console.log(`  存储模式   ${resolveStoreMode()}`)
+  console.log(`  AI 打标    ${opts.useAI ? (process.env.ZHIPU_API_KEY ? '启用' : '未配 ZHIPU_API_KEY，将只用规则') : '已禁用'}`)
+  console.log(`  LibreOffice ${findLibreOffice() ? '已安装（Office 转高保真 PDF）' : '未安装（Office 走 HTML 降级预览）'}`)
+
+  // remote 模式必须凭据齐备，绝不静默退回本地
+  if (resolveStoreMode() === 'remote' && !opts.dryRun) {
+    requireEnv(['SITE_ID', 'NETLIFY_ACCESS_TOKEN'], '向线上 Blobs 入库')
+  }
+
+  const taxonomy = loadTaxonomy(TAXONOMY_FILE)
+  console.log(`  分类词表   ${taxonomy.categories.length} 类 / ${taxonomy.tags.length} 标签`)
+
+  // ---- 扫描 ----
+  const files = []
+  for (const p of opts.paths) {
+    const abs = resolve(p)
+
+    // 默认的 inbox/ 不存在时自动建，省得用户先手动 mkdir 再回来
+    if (!existsSync(abs) && abs === join(ROOT, 'inbox')) {
+      const { mkdirSync, writeFileSync } = await import('node:fs')
+      mkdirSync(abs, { recursive: true })
+      writeFileSync(join(abs, '把文档放进这个文件夹.txt'),
+        '把要入库的文档放进本文件夹，然后运行：\n\n'
+        + '    node scripts/ingest.mjs\n\n'
+        + '支持 PDF / DOCX / XLSX / PPTX / MD / TXT / CSV。\n'
+        + '本文件夹已在 .gitignore 中忽略，文档不会进 Git。\n', 'utf8')
+      console.log(`\n  已创建 ${abs}（把文档放进去后重跑本命令）`)
+    }
+
+    if (!existsSync(abs)) {
+      console.log(`\n  ⚠ 路径不存在，已跳过：${abs}`)
+      continue
+    }
+    const found = scanFiles(abs)
+    console.log(`\n  扫描 ${abs} → ${found.length} 个可入库文件`)
+    files.push(...found)
+  }
+
+  if (files.length === 0) {
+    console.log('\n  没有可入库的文件。')
+    console.log('  把文档放进 inbox/ 目录后重跑，或指定目录：')
+    console.log('    node scripts/ingest.mjs "D:\\我的文档"')
+    return
+  }
+
+  const target = opts.limit > 0 ? files.slice(0, opts.limit) : files
+
+  // ---- 逐份处理 ----
+  const ctx = {
+    taxonomy,
+    useAI: opts.useAI,
+    apiKey: process.env.ZHIPU_API_KEY || '',
+    force: opts.force,
+    dryRun: opts.dryRun,
+    pathIndex: await readPathIndex(),
+    ingested: [],
+  }
+
+  const tally = { ingested: 0, unchanged: 0, duplicate: 0, skip: 0, would: 0, failed: 0 }
+
+  console.log(`\n  开始处理 ${target.length} 个文件${opts.dryRun ? '（dry-run，不写入）' : ''}\n`)
+
+  for (let i = 0; i < target.length; i++) {
+    const file = target[i]
+    const label = `[${String(i + 1).padStart(3)}/${target.length}]`
+    try {
+      const r = await ingestOne(file, ctx)
+      const short = r.name.length > 44 ? r.name.slice(0, 41) + '…' : r.name
+
+      if (r.status === 'ingested') {
+        tally.ingested++
+        const tags = (r.tags ?? []).slice(0, 4).join(',')
+        console.log(`  ${label} ✓ ${short}`)
+        console.log(`          → ${r.title}`)
+        console.log(`            分类 ${(r.categories ?? []).join('/')} | 标签 ${tags || '无'} | 正文 ${r.textChars} 字 | 预览 ${r.previewKind}${r.needsReview ? ' | ⚠待复查' : ''}`)
+      } else if (r.status === 'unchanged') {
+        tally.unchanged++
+        console.log(`  ${label} = ${short}（内容未变，跳过）`)
+      } else if (r.status === 'duplicate') {
+        tally.duplicate++
+        console.log(`  ${label} ⧉ ${short}（同样内容已存在：${r.id}）`)
+      } else if (r.status === 'would-ingest') {
+        tally.would++
+        console.log(`  ${label} ? ${short}（将入库，${(r.size / 1024).toFixed(0)}KB）`)
+      } else {
+        tally.skip++
+        console.log(`  ${label} − ${short}（${r.reason}）`)
+      }
+    } catch (err) {
+      tally.failed++
+      console.log(`  ${label} ✗ ${basename(file)}`)
+      console.log(`          ${err?.message ?? err}`)
+    }
+  }
+
+  // ---- 重建索引 ----
+  // 索引面向全库重建（而不是只针对本次入库的几份），
+  // 逻辑与 scripts/reindex.mjs 共用，保证两条路径产物一致。
+  if (!opts.dryRun) {
+    console.log('\n  重建检索索引…')
+    const result = await rebuildStoreIndex({
+      taxonomy,
+      pathIndex: ctx.pathIndex,
+      onProgress: (msg) => console.log(`  · ${msg}`),
+    })
+    console.log(`  索引完成：${result.docCount} 份文档 / ${result.termCount} 个词条 / 版本 ${result.version}`)
+  }
+
+  // ---- 汇总 ----
+  console.log('\n────────────────────────────────')
+  if (opts.dryRun) {
+    console.log(`  dry-run：${tally.would} 份将入库，${tally.unchanged} 份未变，${tally.duplicate} 份重复，${tally.skip} 份跳过`)
+  } else {
+    console.log(`  新入库 ${tally.ingested} | 未变 ${tally.unchanged} | 重复 ${tally.duplicate} | 跳过 ${tally.skip} | 失败 ${tally.failed}`)
+  }
+
+  if (env.loaded) console.log(`  已读取 .env（${env.keys.length} 个键）`)
+  console.log('')
+}
+
+main().catch((err) => {
+  console.error('\n入库失败：', err?.message ?? err)
+  if (err?.code === 'BLOBS_UNAVAILABLE' || err?.code === 'MISSING_ENV') {
+    console.error('\n提示：remote 模式需要 SITE_ID + NETLIFY_ACCESS_TOKEN。')
+    console.error('     若只想在本地试用，把 DOCS_STORE_MODE 设为 local（或不设，默认就是 local）。')
+  }
+  process.exit(1)
+})

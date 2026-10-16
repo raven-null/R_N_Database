@@ -18,18 +18,82 @@ Netlify 静态站 + Functions v2 + **Netlify Blobs** 作存储，零构建、无
 
 ## 快速开始（本地）
 
-无需安装任何依赖即可跑通：
-
 ```bash
-node scripts/check.mjs        # 构建校验（含密钥泄漏扫描）
-node scripts/probe.mjs        # 环境探测
-node scripts/dev-server.mjs   # 本地服务器 → http://127.0.0.1:8899
+npm install                     # 装依赖（首次）
+node scripts/ingest.mjs         # 把 inbox/ 里的文档入库
+node scripts/dev-server.mjs     # 启动 → http://127.0.0.1:8899
 ```
 
-打开 <http://127.0.0.1:8899/> 可看到自检面板；API 探活见
-<http://127.0.0.1:8899/api/v1/health>。
+打开 <http://127.0.0.1:8899/>：左侧按分类/格式/标签筛选，顶部搜索框即时筛选，
+**按回车则全文检索正文**；点任意文档进入阅读页，可直接内嵌预览与下载。
+
+入库指定目录（不必先拷进 `inbox/`）：
+
+```bash
+node scripts/ingest.mjs "D:\我的文档"       # 递归扫描
+node scripts/ingest.mjs "D:\我的文档" --dry-run   # 只看会入库什么
+node scripts/ingest.mjs --force            # 忽略去重强制重入
+node scripts/ingest.mjs --no-ai            # 只用规则分类，跳过 AI
+```
+
+改过分类词表或分词策略后重建索引（**不重新抽取文档**）：
+
+```bash
+node scripts/reindex.mjs
+```
+
+其他命令：
+
+```bash
+node scripts/check.mjs          # 构建校验（含密钥泄漏扫描）
+node scripts/probe.mjs          # 环境探测
+npm run test:dom                # 前端冒烟测试（需 dev-server 在跑）
+```
 
 本地默认使用 `.local-data/` 文件存储，**不会碰线上数据**。
+
+## 入库流水线
+
+```
+扫描目录
+  → SHA-256 去重（同内容自动识别；同路径不同内容删旧迎新）
+  → 抽元数据（标题/作者/页数/创建时间）
+  → 抽正文：pdfjs-dist(PDF) · mammoth(docx) · exceljs(xlsx) · JSZip(pptx)
+  → 分类打标：规则层始终跑；配了 ZHIPU_API_KEY 再叠 AI 层
+  → 生成预览件：PDF 直接用原件；Office 装 LibreOffice 则转 PDF，否则 HTML 降级
+  → 直写存储 → 重建倒排索引
+```
+
+**标题处理有个坑值得说明**：PDF/PPTX 的内嵌 Title 常是 `about:blank`、
+`空白演示` 这类垃圾值。若直接采信，列表页会显示一串无意义标题，
+而且会顶掉文件名 —— 分类规则就拿不到「简历」「发票」这类关键线索。
+实测一份简历因内嵌标题是 `about:blank` 被误分到「项目文档」。
+现在垃圾标题会被丢弃并回退到文件名。
+
+## 分类与检索
+
+### 分类：受控词表
+
+`config/taxonomy.json` 定义 10 个一级分类 + 起始标签集。
+**AI 只能从词表里选，不允许自由造分类**；新建标签会自动追加「待整理」
+提醒复查 —— 不加这条约束，分类迟早腐烂成一堆同义词。
+
+规则打分的关键设计：**标题命中权重 10 倍于正文**，且对跨分类的歧义词降权。
+初版让标题与正文同权，结果一份文件名含「简历」的 PDF 被正文里的「设计」
+和「指标」反超，分到了「项目文档」。
+
+### 检索：BM25 + 中英混排分词
+
+- **分词用 `Intl.Segmenter`**（Node 20+ 与浏览器原生支持），零依赖
+- 索引同时写**分词结果**与 **CJK 二元组**：后者用于召回兜底
+- 打分用 **BM25**（词频饱和 + 文档长度归一化）
+
+第一版只按「命中词条数 × idf」打分，缺陷明显：搜「操作系统」时，
+一份**只在技能栏提了一次**「操作系统」的简历，与整篇讲操作系统的课件
+拿到完全相同的 2.30 分。改用 BM25 后变成 0.87 / 0.76 / 0.41，排序正确 ——
+「提一次」和「通篇都是」终于被区分开了。
+
+前端筛选与即时搜索走本地（manifest 一次拉全库），只有按回车查正文时才打接口。
 
 ## 部署流程（GitHub → Netlify 自动部署）
 
@@ -114,9 +178,28 @@ Netlify Token 等。push 前跑一次即可。
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0 | 地基：骨架、存储层、鉴权层、探活、构建护栏 | ✅ |
-| 1 | 入库流水线、预览生成、列表页、阅读页、门禁 | 待办 |
-| 2 | 公用 API、工作站 MCP 工具、博客资料页 | 待办 |
-| 3 | AI 分类打标、全文检索、拼音搜索 | 待办 |
-| 4 | 备份导出、CI、容量审计 | 待办 |
+| 1 | 入库流水线、预览生成、列表页、阅读页、检索 | ✅ |
+| 2 | 公用 API 冻结、工作站 MCP 工具、博客资料页 | API 已完成，待接入 |
+| 3 | AI 自动分类打标（需配 ZHIPU_API_KEY 验证效果） | 代码就绪，待验证 |
+| 4 | 密码门禁 UI、备份导出、CI、容量审计 | 待办 |
+
+### 已实现的 API（`/api/v1`）
+
+```
+GET  /api/v1/health              探活与自检（免鉴权，不泄密）
+GET  /api/v1/docs                列表（q/category/tag/type/sort/page/limit）
+GET  /api/v1/docs/{id}           元数据
+GET  /api/v1/docs/{id}/text      抽取正文（给 AI 用，支持 ?maxChars=）
+GET  /api/v1/docs/{id}/file      原件（支持 Range，附件下载）
+GET  /api/v1/docs/{id}/preview   预览件（内联，PDF/HTML）
+GET  /api/v1/search?q=           全文检索（BM25，带命中片段与页码）
+GET  /api/v1/taxonomy            分类树 + 标签表（含计数）
+GET  /api/v1/manifest            全量清单 + 索引版本（支持 ETag → 304）
+POST /api/v1/auth/login          密码换角色
+GET  /api/v1/auth/status         当前鉴权状态
+```
+
+统一响应：成功 `{ ok:true, data }`，失败 `{ ok:false, error:{code,message} }`。
+鉴权三通道：`X-Auth-Token` 头、`?token=`、`?exp=&sig=` 短期签名 URL。
 
 详见 `docs/方案.md`。

@@ -111,7 +111,14 @@ export function contentDisposition(filename, inline = false) {
 /**
  * 二进制/文本内容响应（原件、预览件走这里）。
  *
- * @param {BodyInit} body - 响应体（ArrayBuffer / Buffer / ReadableStream）
+ * 三件必须做对的事：
+ *   1. **显式设置 Content-Length**。不设的话响应会退化成 chunked 编码，
+ *      浏览器下载没有进度、PDF 阅读器无法判断文件大小。
+ *   2. **支持 Range 请求**。PDF 阅读器与视频组件都会发 `Range`，
+ *      返回 206 才能正常 seek；顺带给出 Accept-Ranges 声明。
+ *   3. **中文文件名用 RFC 5987 编码**（见 contentDisposition）。
+ *
+ * @param {BodyInit} body - 响应体（ArrayBuffer / TypedArray / string / Stream）
  * @param {object} opts - { contentType, filename, inline, req, headers, cacheControl }
  * @returns {Response} 响应
  */
@@ -124,5 +131,52 @@ export function content(body, opts = {}) {
     ...opts.headers,
   }
   if (opts.filename) headers['Content-Disposition'] = contentDisposition(opts.filename, opts.inline)
-  return new Response(body, { status: 200, headers })
+
+  // 非二进制（流、字符串）交给运行时处理
+  const isBinary = body instanceof ArrayBuffer || ArrayBuffer.isView(body)
+  if (!isBinary) return new Response(body, { status: 200, headers })
+
+  const buf = body instanceof ArrayBuffer
+    ? new Uint8Array(body)
+    : new Uint8Array(body.buffer, body.byteOffset, body.byteLength)
+  const total = buf.byteLength
+  headers['Accept-Ranges'] = 'bytes'
+
+  // ---- Range 处理（单区间）----
+  const rangeHeader = String(opts.req?.headers?.get?.('range') ?? '').trim()
+  const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader)
+
+  if (m && rangeHeader) {
+    let start = m[1] === '' ? null : Number(m[1])
+    let end = m[2] === '' ? null : Number(m[2])
+
+    if (start === null && end !== null) {
+      // 后缀区间：bytes=-500 表示最后 500 字节
+      start = Math.max(total - end, 0)
+      end = total - 1
+    } else {
+      if (start === null) start = 0
+      if (end === null || end >= total) end = total - 1
+    }
+
+    if (start > end || start >= total) {
+      return new Response(null, {
+        status: 416,
+        headers: { ...headers, 'Content-Range': `bytes */${total}` },
+      })
+    }
+
+    const slice = buf.subarray(start, end + 1)
+    return new Response(slice, {
+      status: 206,
+      headers: {
+        ...headers,
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Content-Length': String(slice.byteLength),
+      },
+    })
+  }
+
+  headers['Content-Length'] = String(total)
+  return new Response(buf, { status: 200, headers })
 }

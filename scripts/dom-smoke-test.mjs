@@ -1,0 +1,314 @@
+/**
+ * 前端冒烟测试：在 jsdom 里真实跑一遍列表页与阅读页。
+ *
+ * 为什么需要它：前端模块「语法正确」不等于「渲染正确」。
+ * 没有这个测试，界面问题只能靠人工开浏览器发现。
+ * 这里把 index.html / view.html 装进 jsdom，用真实的后端 API 响应
+ * 喂给 fetch，然后断言 DOM 里确实出现了文档条目、筛选真的生效、
+ * 阅读页真的挂上了预览 iframe。
+ *
+ * 前提：开发服务器已在运行（默认 127.0.0.1:8899）。
+ *
+ * 用法：
+ *   node scripts/dev-server.mjs        # 另一个终端
+ *   node scripts/dom-smoke-test.mjs
+ *
+ * @module scripts/dom-smoke-test
+ */
+
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { JSDOM, VirtualConsole } from 'jsdom'
+
+const ROOT = process.cwd()
+const BASE = process.env.SMOKE_BASE ?? 'http://127.0.0.1:8899'
+
+/**
+ * ★ 必须在任何覆盖之前捕获 Node 原生 fetch。
+ *
+ * 踩过的坑：下面会把 `window.fetch` 桥接到真实服务器，而 runModule
+ * 又把 `globalThis.fetch` 指向 `window.fetch`。若桥接函数内部直接调用
+ * 裸 `fetch`，它解析到的正是被覆盖后的 `window.fetch` —— 无限递归，
+ * 报 "Maximum call stack size exceeded"，而且错误信息会伪装成
+ * 「加载清单失败」，极易误判成应用 bug。
+ */
+const nodeFetch = globalThis.fetch.bind(globalThis)
+
+let passed = 0
+let failed = 0
+
+/**
+ * 断言。
+ * @param {boolean} cond - 条件
+ * @param {string} label - 描述
+ * @param {string} [detail] - 失败详情
+ */
+function check(cond, label, detail = '') {
+  if (cond) {
+    passed += 1
+    console.log(`  ✓ ${label}`)
+  } else {
+    failed += 1
+    console.log(`  ✗ ${label}${detail ? `\n      ${detail}` : ''}`)
+  }
+}
+
+/**
+ * 等到某个条件成立（轮询 DOM）。
+ * @param {Function} fn - 判定函数
+ * @param {number} [timeoutMs] - 超时
+ * @returns {Promise<boolean>} 是否成立
+ */
+async function waitFor(fn, timeoutMs = 5000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      if (fn()) return true
+    } catch {
+      /* DOM 尚未就绪，继续等 */
+    }
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  return false
+}
+
+/**
+ * 让事件循环空转一会儿（等 debounce 与异步渲染落地）。
+ * @param {number} [ms] - 毫秒
+ * @returns {Promise<void>} 完成
+ */
+const tick = (ms = 150) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * 建一个 jsdom 环境，把 fetch 桥接到真实开发服务器。
+ * @param {string} page - 页面文件名（可含查询串）
+ * @returns {{dom:JSDOM, errors:string[]}} 环境
+ */
+function makeDom(page) {
+  const html = readFileSync(join(ROOT, 'public', page.split('?')[0]), 'utf8')
+  const errors = []
+
+  const virtualConsole = new VirtualConsole()
+  virtualConsole.on('jsdomError', (e) => errors.push(String(e?.message ?? e)))
+
+  const dom = new JSDOM(html, {
+    url: `${BASE}/${page}`,
+    runScripts: 'outside-only',   // 手动执行模块，便于捕获错误
+    pretendToBeVisual: true,
+    virtualConsole,
+  })
+
+  const { window } = dom
+
+  // 桥接 fetch：相对路径补成绝对地址后转发。
+  // 用捕获好的 nodeFetch，绝不能写裸 fetch（会递归到自身）。
+  window.fetch = (input, init) => {
+    const url = typeof input === 'string' && input.startsWith('/') ? BASE + input : input
+    return nodeFetch(url, init)
+  }
+
+  // jsdom 的 localStorage 在 file/无 origin 场景下可能缺失，补一个内存版
+  if (!window.localStorage) {
+    const store = new Map()
+    window.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    }
+  }
+
+  return { dom, errors }
+}
+
+/**
+ * 在 jsdom 里执行一个前端模块。
+ *
+ * 模块用相对路径 import，所以交给 Node 原生 ESM 执行；
+ * 把 document / window 等注入全局，模块就会操作 jsdom 的 DOM。
+ *
+ * @param {JSDOM} dom - 环境
+ * @param {string} relPath - 相对 public 的模块路径
+ * @returns {Promise<void>} 完成
+ */
+async function runModule(dom, relPath) {
+  const { window } = dom
+  globalThis.window = window
+  globalThis.document = window.document
+  globalThis.location = window.location
+  globalThis.localStorage = window.localStorage
+  globalThis.alert = () => {}
+  globalThis.prompt = () => null
+  globalThis.fetch = window.fetch
+
+  // 加时间戳绕开 ESM 模块缓存，保证多轮测试互不干扰
+  const url = new URL(`../public/${relPath}`, import.meta.url).href
+  await import(`${url}?t=${Date.now()}`)
+}
+
+/* ============================================================
+   列表页
+   ============================================================ */
+
+async function testListPage() {
+  console.log('\n【列表页 index.html】')
+  const { dom, errors } = makeDom('index.html')
+  const { document } = dom.window
+
+  await runModule(dom, 'js/list.js')
+
+  const rendered = await waitFor(() => document.querySelectorAll('.doc').length > 0)
+  check(
+    rendered,
+    '文档条目渲染出来了',
+    `results 内容：${document.getElementById('results')?.textContent?.slice(0, 200)}`,
+  )
+
+  const rows = document.querySelectorAll('.doc')
+  check(rows.length >= 3, `渲染了 ${rows.length} 条文档（期望 ≥3）`)
+
+  const titles = [...document.querySelectorAll('.doc-title')].map((e) => e.textContent.trim())
+  check(titles.some((t) => t.includes('简历')), `标题含「简历第一版」：${titles.join(' | ')}`)
+  check(titles.some((t) => t.includes('动效说明')), '标题含「动效说明」')
+
+  const chips = [...document.querySelectorAll('.chip')].map((e) => e.textContent.trim())
+  check(chips.some((c) => c.startsWith('求职职场')), `分类切面含「求职职场」：${chips.slice(0, 8).join(' / ')}`)
+
+  const stats = document.getElementById('stats')?.textContent ?? ''
+  check(/\d+\s*份/.test(stats), `统计行显示份数：${stats}`)
+
+  const badges = [...new Set([...document.querySelectorAll('.type-badge')].map((e) => e.textContent.trim()))]
+  check(badges.includes('PDF') && badges.includes('PPTX'), `类型徽标正确：${badges.join(',')}`)
+
+  // ---- 点分类切面 → 真的筛选 ----
+  const catChip = [...document.querySelectorAll('.chip')].find((e) => e.textContent.trim().startsWith('求职职场'))
+  if (!catChip) {
+    check(false, '找不到「求职职场」切面，无法验证筛选')
+  } else {
+    catChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    await tick(120)
+    const n = document.querySelectorAll('.doc').length
+    check(n === 1, `点「求职职场」后剩 ${n} 条（期望 1）`)
+
+    catChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))  // 取消
+    await tick(120)
+  }
+
+  // ---- 搜索框即时筛选 ----
+  const search = document.getElementById('search')
+  search.value = '动效'
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  await tick(350)
+
+  const afterSearch = document.querySelectorAll('.doc').length
+  const searchTitles = [...document.querySelectorAll('.doc-title')].map((e) => e.textContent.trim())
+  check(
+    afterSearch === 1 && (searchTitles[0] ?? '').includes('动效'),
+    `搜「动效」命中 ${afterSearch} 条：${searchTitles.join(' | ')}`,
+  )
+
+  check(errors.length === 0, '运行期无 jsdom 报错', errors.join('\n      '))
+  dom.window.close()
+}
+
+/* ============================================================
+   阅读页
+   ============================================================ */
+
+async function testViewPage() {
+  console.log('\n【阅读页 view.html】')
+
+  const listRes = await nodeFetch(`${BASE}/api/v1/docs`)
+  const list = await listRes.json()
+  const pdf = list.data.items.find((d) => d.type === 'pdf')
+  const pptx = list.data.items.find((d) => d.type === 'pptx')
+
+  // ---- PDF：应挂原生预览 iframe + 下载按钮 ----
+  if (!pdf) {
+    check(false, '库里没有 PDF 文档，跳过阅读页测试')
+  } else {
+    const { dom, errors } = makeDom(`view.html?id=${pdf.id}`)
+    const { document } = dom.window
+    await runModule(dom, 'js/view.js')
+
+    await waitFor(() => document.getElementById('doc-title')?.textContent !== '加载中…')
+
+    const title = document.getElementById('doc-title').textContent
+    check(title.includes('简历'), `PDF：标题 = ${title}`)
+
+    const iframe = document.querySelector('iframe.pdf')
+    check(Boolean(iframe), 'PDF：挂上了内嵌预览 iframe')
+    check(
+      (iframe?.getAttribute('src') ?? '').includes(`/api/v1/docs/${pdf.id}/preview`),
+      'PDF：iframe 指向 preview 接口',
+    )
+
+    const dl = [...document.querySelectorAll('.actions a')].find((a) => a.textContent.includes('下载'))
+    check((dl?.getAttribute('href') ?? '').includes('/file'), 'PDF：有下载按钮且指向 file 接口')
+    check(Boolean(dl?.hasAttribute('download')), 'PDF：下载链接带 download 属性')
+    check(document.getElementById('doc-meta').textContent.includes('PDF'), 'PDF：元信息含格式')
+
+    check(errors.length === 0, 'PDF：无 jsdom 报错', errors.join('\n      '))
+    dom.window.close()
+  }
+
+  // ---- PPTX：HTML 降级预览 ----
+  if (!pptx) {
+    check(false, '库里没有 PPTX 文档，跳过降级预览测试')
+  } else {
+    const { dom, errors } = makeDom(`view.html?id=${pptx.id}`)
+    const { document } = dom.window
+    await runModule(dom, 'js/view.js')
+
+    await waitFor(() => document.getElementById('doc-title')?.textContent !== '加载中…')
+
+    check(Boolean(document.querySelector('iframe.html')), 'PPTX：挂上了 HTML 预览 iframe')
+
+    const notice = document.getElementById('notice')?.textContent ?? ''
+    check(
+      notice.includes('HTML 降级') || notice.includes('LibreOffice'),
+      `PPTX：提示了预览件来源：${notice.slice(0, 90)}`,
+    )
+
+    check(errors.length === 0, 'PPTX：无 jsdom 报错', errors.join('\n      '))
+    dom.window.close()
+  }
+}
+
+/* ============================================================
+   主流程
+   ============================================================ */
+
+async function main() {
+  console.log('▸ R_N_Database 前端冒烟测试')
+  console.log(`  后端 ${BASE}`)
+
+  try {
+    const res = await nodeFetch(`${BASE}/api/v1/health`)
+    const body = await res.json()
+    if (!body?.ok) throw new Error('health 未返回 ok')
+    console.log(`  存储 ${body.data.store.mode} / 文档 ${body.data.docCount} 份`)
+    if (!body.data.docCount) {
+      console.log('\n  资料库是空的，先跑一次入库：')
+      console.log('    node scripts/ingest.mjs "你的文档目录"\n')
+      process.exit(1)
+    }
+  } catch (err) {
+    console.error(`\n  无法连接开发服务器（${BASE}）：${err.message}`)
+    console.error('  请先在另一个终端运行：node scripts/dev-server.mjs\n')
+    process.exit(1)
+  }
+
+  await testListPage()
+  await testViewPage()
+
+  console.log('\n────────────────────────────────')
+  console.log(`  通过 ${passed} / 失败 ${failed}`)
+  console.log('')
+  process.exit(failed === 0 ? 0 : 1)
+}
+
+main().catch((err) => {
+  console.error('\n冒烟测试自身出错：', err)
+  process.exit(1)
+})

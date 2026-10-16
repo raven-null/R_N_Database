@@ -44,11 +44,18 @@ const MIME = {
 
 /**
  * 加载全部函数，按 config.path 建路由表。
- * @returns {Promise<Map<string, {handler:Function, file:string}>>} 路由表
+ *
+ * 支持 `config.path` 为字符串或字符串数组，并支持 `/*` 通配后缀 ——
+ * 与 Netlify Functions v2 的语义保持一致，这样本地跑通的路径
+ * 在线上不会变样。
+ *
+ * @returns {Promise<{routes:Map<string, object>, wildcards:Array<object>}>} 路由表
  */
 async function loadRoutes() {
   const routes = new Map()
-  if (!existsSync(FUNC_DIR)) return routes
+  const wildcards = []
+
+  if (!existsSync(FUNC_DIR)) return { routes, wildcards }
 
   for (const file of readdirSync(FUNC_DIR).filter((f) => f.endsWith('.mjs'))) {
     const full = join(FUNC_DIR, file)
@@ -59,13 +66,42 @@ async function loadRoutes() {
       console.error(`  ✗ 函数 ${file} 加载失败：${err?.message ?? err}`)
       continue
     }
-    const path = mod.config?.path
-    if (path && typeof mod.default === 'function') {
-      routes.set(path, { handler: mod.default, file })
-      console.log(`  · 路由 ${path.padEnd(24)} → ${file}`)
+
+    const declared = mod.config?.path
+    const paths = Array.isArray(declared) ? declared : (declared ? [declared] : [])
+
+    if (paths.length === 0 || typeof mod.default !== 'function') continue
+
+    for (const p of paths) {
+      const entry = { handler: mod.default, file, pattern: p }
+      if (p.endsWith('/*')) {
+        wildcards.push({ ...entry, prefix: p.slice(0, -2) })
+        console.log(`  · 路由 ${(p + '  (通配)').padEnd(28)} → ${file}`)
+      } else {
+        routes.set(p, entry)
+        console.log(`  · 路由 ${p.padEnd(28)} → ${file}`)
+      }
     }
   }
-  return routes
+
+  // 长的前缀优先匹配，避免 /api/v1/a/* 被 /api/v1/* 抢先
+  wildcards.sort((a, b) => b.prefix.length - a.prefix.length)
+  return { routes, wildcards }
+}
+
+/**
+ * 按路径匹配路由（精确优先，其次通配）。
+ * @param {string} pathname - 请求路径
+ * @param {Map<string,object>} routes - 精确路由表
+ * @param {Array<object>} wildcards - 通配路由表
+ * @returns {object|null} 命中的路由
+ */
+function matchRoute(pathname, routes, wildcards) {
+  if (routes.has(pathname)) return routes.get(pathname)
+  for (const w of wildcards) {
+    if (pathname === w.prefix || pathname.startsWith(`${w.prefix}/`)) return w
+  }
+  return null
 }
 
 /**
@@ -145,13 +181,13 @@ async function main() {
   const mode = resolveStoreMode()
   console.log(`  · 存储模式：${mode}${mode === 'local' ? '（.local-data/，不碰线上数据）' : '（真实 Netlify Blobs）'}`)
 
-  const routes = await loadRoutes()
+  const { routes, wildcards } = await loadRoutes()
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
     // 1) API 路由
-    const hit = routes.get(url.pathname)
+    const hit = matchRoute(url.pathname, routes, wildcards)
     if (hit) {
       try {
         const response = await hit.handler(await toRequest(req))
