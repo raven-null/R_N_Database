@@ -63,16 +63,33 @@ export async function getAuthConfig() {
   }
   if (!cfg || typeof cfg !== 'object') cfg = {}
 
-  // 首次启动：用环境变量播种 admin 密码
-  if (!cfg.adminHash && process.env.ADMIN_TOKEN) {
-    cfg.adminHash = sha256hex(process.env.ADMIN_TOKEN)
-    cfg.updatedAt = new Date().toISOString()
-    try {
-      await store.set(KEY_AUTH_CONFIG, JSON.stringify(cfg))
-    } catch {
-      /* 写失败也继续用内存里的值，不阻塞请求 */
+  // ---- 环境变量里的 ADMIN_TOKEN 始终优先 ----
+  //
+  // 修过两个坑：
+  //
+  // 1. 早期写成 `if (!cfg.adminHash && process.env.ADMIN_TOKEN)` ——
+  //    只要播种过一次，环境变量就被**永久忽略**。于是在 Netlify 改了密码
+  //    毫无效果，一直被 Blobs 里的旧哈希压着，表现为「密码明明改了却登不进」。
+  //    现在环境变量每次都比对并覆盖，**部署环境里的值就是唯一真相**。
+  //
+  // 2. 没有 trim。网页表单里粘贴很容易带上尾随空格或换行，
+  //    于是 sha256('Raven_NULL ') ≠ sha256('Raven_NULL')，
+  //    而客户端提交前会 trim —— 结果就是「密码完全正确却提示密码不正确」。
+  const envToken = String(process.env.ADMIN_TOKEN ?? '').trim()
+  if (envToken) {
+    const envHash = sha256hex(envToken)
+    if (cfg.adminHash !== envHash) {
+      cfg.adminHash = envHash
+      cfg.updatedAt = new Date().toISOString()
+      cfg.seededFrom = 'ADMIN_TOKEN'
+      try {
+        await store.set(KEY_AUTH_CONFIG, JSON.stringify(cfg))
+      } catch {
+        /* 写失败也继续用内存里的值，不阻塞请求 */
+      }
     }
   }
+
   return cfg
 }
 
@@ -231,6 +248,16 @@ export async function authStatus() {
       hasAdmin: Boolean(cfg.adminHash),
       hasRead: Boolean(cfg.readHash),
       hasGuest: Boolean(cfg.guestHash),
+      /**
+       * 部署环境里是否能看到 ADMIN_TOKEN（**只报有没有，不报值**）。
+       *
+       * 这是排查「密码设了却登不进」最快的依据：
+       *   false → 环境变量没传到函数（多半是改了变量但没重新部署，
+       *           或作用域没勾 Functions/Runtime）
+       *   true  → 环境变量已生效，且它优先于存储里的旧哈希
+       */
+      envTokenPresent: Boolean(String(process.env.ADMIN_TOKEN ?? '').trim()),
+      seedSource: cfg.seededFrom ?? (cfg.adminHash ? 'stored' : null),
       // 未登录访客能做什么：只能看显式标记为 public 的文档
       anonymousRole: 'guest',
       // 没有 admin 密码时谁都不能写入（上传、改标签等一律被拒）

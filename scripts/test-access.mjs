@@ -286,6 +286,52 @@ async function main() {
     check(devStatus.body?.data?.role === 'admin', `无密码时为 admin（${devStatus.body?.data?.role}）`)
     check(devStatus.body?.data?.configured === false, 'configured = false')
 
+    /* ---------- 7. ADMIN_TOKEN 优先级与空白容错 ---------- */
+    // 这两条是从「线上设了密码却登不进」的故障里补的回归
+    console.log('\n【7. ADMIN_TOKEN 优先级与空白容错】')
+    const st = await api(GUARDED, '/api/v1/auth/status')
+    check(st.body?.data?.envTokenPresent === true,
+      `envTokenPresent = true（环境变量已传到函数）`)
+    check(st.body?.data?.seedSource === 'ADMIN_TOKEN',
+      `密码来源是 ADMIN_TOKEN 而不是存储里的旧哈希（${st.body?.data?.seedSource}）`)
+
+    // 换一个带尾随空白与换行的令牌再起实例 —— 网页表单粘贴时极常见，
+    // 客户端提交前会 trim，若服务端不 trim 就会「密码正确却说密码不正确」
+    const WS_PORT = 8902
+    const WS_BASE = `http://127.0.0.1:${WS_PORT}`
+    const wsChild = spawn(process.execPath, [join(ROOT, 'scripts', 'dev-server.mjs')], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        PORT: String(WS_PORT),
+        ADMIN_TOKEN: `  ${ADMIN_TOKEN}-ws  \n`,
+        DOCS_STORE_MODE: 'local',
+        DOCS_LOCAL_DIR: GUARDED_DIR,
+      },
+      stdio: 'ignore',
+    })
+    try {
+      if (!await waitReady(WS_BASE)) throw new Error('带空白令牌的实例未就绪')
+      const wsLogin = await api(WS_BASE, '/api/v1/auth/login', {
+        method: 'POST',
+        body: { token: `${ADMIN_TOKEN}-ws` },
+      })
+      check(wsLogin.status === 200,
+        `环境变量带尾随空白，登录仍然成功（${wsLogin.status}）`,
+        wsLogin.body?.error?.message)
+      check(wsLogin.body?.data?.role === 'admin', `角色 admin（${wsLogin.body?.data?.role}）`)
+
+      // 新令牌生效后，**旧令牌必须失效**（早期版本被旧哈希永久压住）
+      const oldToken = await api(WS_BASE, '/api/v1/auth/login', {
+        method: 'POST', body: { token: ADMIN_TOKEN },
+      })
+      check(oldToken.status === 401,
+        `换令牌后旧密码已失效（${oldToken.status}）`)
+    } finally {
+      wsChild.kill()
+      await new Promise((r) => setTimeout(r, 300))
+    }
+
     // 清理上传的待处理项（在隔离实例里）
     if (pendingId) {
       await api(GUARDED, `/api/v1/inbox/${pendingId}`, { method: 'DELETE', token: ADMIN_TOKEN })
