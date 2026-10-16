@@ -27,9 +27,9 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, extname, join, relative, resolve } from 'node:path'
 
-import { loadEnv, requireEnv } from './env.mjs'
+import { loadEnv, loadExtraEnv, requireEnv } from './env.mjs'
 import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, isJunkTitle, mimeOf } from './lib/extract.mjs'
-import { classify, loadTaxonomy } from './lib/classify.mjs'
+import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
@@ -439,11 +439,19 @@ function escapeHtml(s) {
 
 async function main() {
   const env = loadEnv()
+  // 显式指定的额外 .env（如复用工作站的 LLM 配置），不指定就不读
+  const extraEnv = loadExtraEnv()
   const opts = parseArgs()
 
   console.log('▸ R_N_Database 入库\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
-  console.log(`  AI 打标    ${opts.useAI ? (process.env.ZHIPU_API_KEY ? '启用' : '未配 ZHIPU_API_KEY，将只用规则') : '已禁用'}`)
+
+  const ai = resolveAIConfig()
+  console.log(`  AI 打标    ${opts.useAI
+    ? (ai.configured
+        ? `启用 · ${ai.model} · ${ai.endpoint}\n             密钥来源 ${ai.source}`
+        : '未配置密钥，将只用规则分类（可设 AI_API_KEY / ZHIPU_API_KEY）')
+    : '已禁用（--no-ai）'}`)
   console.log(`  LibreOffice ${findLibreOffice() ? '已安装（Office 转高保真 PDF）' : '未安装（Office 走 HTML 降级预览）'}`)
 
   // remote 模式必须凭据齐备，绝不静默退回本地
@@ -493,7 +501,9 @@ async function main() {
   const ctx = {
     taxonomy,
     useAI: opts.useAI,
-    apiKey: process.env.ZHIPU_API_KEY || '',
+    // 具体用哪把 key / 哪个端点由 classify 里的 resolveAIConfig 决定，
+    // 不在这里写死，以便复用工作站已有的 STATION_LLM_* 配置
+    apiKey: '',
     force: opts.force,
     dryRun: opts.dryRun,
     pathIndex: await readPathIndex(),
@@ -559,6 +569,9 @@ async function main() {
   }
 
   if (env.loaded) console.log(`  已读取 .env（${env.keys.length} 个键）`)
+  if (extraEnv.loaded) {
+    console.log(`  已读取 DOCS_AI_ENV 指定的 ${extraEnv.path}（${extraEnv.keys.length} 个键，只报键名不报值）`)
+  }
   console.log('')
 }
 

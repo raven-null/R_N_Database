@@ -44,6 +44,27 @@ export function loadEnv(file = join(process.cwd(), '.env')) {
 }
 
 /**
+ * 载入额外的 .env 文件（由 `DOCS_AI_ENV` 指定路径）。
+ *
+ * 用途：你工作站的 `.env` 里已经有可用的 LLM 配置
+ * （`STATION_LLM_BASE_URL` / `STATION_LLM_API_KEY` / `STATION_LLM_MODEL`），
+ * 没必要为资料库再申请一个 key。
+ *
+ * **但不自动去读**：另一个项目的密钥不该被静默加载。要复用就显式开：
+ *
+ *     DOCS_AI_ENV=E:\01-smart-workstation\.env
+ *
+ * 放在本项目的 .env 里即可。已有的环境变量不会被覆盖。
+ *
+ * @returns {{loaded:boolean, path:string, keys:string[]}} 载入结果（只报键名）
+ */
+export function loadExtraEnv() {
+  const path = String(process.env.DOCS_AI_ENV ?? '').trim()
+  if (!path) return { loaded: false, path: '', keys: [] }
+  return loadEnv(path)
+}
+
+/**
  * 要求某些环境变量必须存在，否则抛出聚合错误。
  * @param {string[]} names - 必需的键名
  * @param {string} purpose - 用途说明（写进报错）

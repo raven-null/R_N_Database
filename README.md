@@ -39,18 +39,50 @@ node scripts/ingest.mjs --no-ai            # 只用规则分类，跳过 AI
 改过分类词表或分词策略后重建索引（**不重新抽取文档**）：
 
 ```bash
-node scripts/reindex.mjs
+node scripts/reindex.mjs         # 重建检索索引
+node scripts/reclassify.mjs      # 只重跑分类（改词表/打分模型后）
+node scripts/reclassify.mjs --dry-run   # 只看会怎么变
+```
+
+清库（预演默认不删）：
+
+```bash
+node scripts/reset.mjs           # 报告将删除什么
+node scripts/reset.mjs --yes     # 真删（只删库内副本，源文件不受影响）
 ```
 
 其他命令：
 
 ```bash
-node scripts/check.mjs          # 构建校验（含密钥泄漏扫描）
-node scripts/probe.mjs          # 环境探测
-npm run test:dom                # 前端冒烟测试（需 dev-server 在跑）
+node scripts/check.mjs           # 构建校验（含密钥泄漏扫描）
+node scripts/probe.mjs           # 环境探测
+npm run test:classify            # 分类回归（16 项，语料无关）
+npm run test:api                 # 写操作回归（30 项，自造临时文档）
+npm run test:dom                 # 前端冒烟（需 dev-server 在跑）
+npm run test:render              # 真实浏览器渲染检查（需 Chrome）
 ```
 
 本地默认使用 `.local-data/` 文件存储，**不会碰线上数据**。
+
+## 开启 AI 打标（可选）
+
+不配也能用 —— 规则层会给出分类与标签，只是没有 AI 摘要、标签偏粗。
+要开启，`.env` 里任选一种：
+
+```bash
+# 方式一：智谱（沿用图库 ai-proxy 的配置）
+ZHIPU_API_KEY=你的key
+
+# 方式二：任意 OpenAI 兼容端点
+AI_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
+AI_API_KEY=你的key
+AI_MODEL=mimo-v2.5
+
+# 方式三：直接复用工作站已有的密钥文件（不写这行就绝不会去读）
+DOCS_AI_ENV=E:\01-smart-workstation\.env
+```
+
+密钥来源优先级：`AI_API_KEY` → `ZHIPU_API_KEY` → `STATION_LLM_API_KEY`。
 
 ## 入库流水线
 

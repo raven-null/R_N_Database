@@ -17,9 +17,50 @@
 
 import { readFileSync } from 'node:fs'
 
-/** 智谱 OpenAI 兼容端点（与图库 ai-proxy 一致）。 */
+/** 智谱 OpenAI 兼容端点（默认，沿用图库 ai-proxy 的配置）。 */
 const ZHIPU_ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
 const ZHIPU_MODEL = 'glm-4-flash'
+
+/**
+ * 解析 AI 配置。
+ *
+ * 刻意**不写死智谱**：工作站的 `.env` 里已有小米 MiMo 的
+ * OpenAI 兼容端点（`STATION_LLM_BASE_URL` / `STATION_LLM_API_KEY` /
+ * `STATION_LLM_MODEL`），资料库没必要逼用户再申请一个 key。
+ * 任何 OpenAI 兼容端点都能用。
+ *
+ * 优先级（越靠前越优先）：
+ *   显式入参 → AI_* → ZHIPU_API_KEY → STATION_LLM_*
+ *
+ * @param {object} [overrides] - { baseUrl, apiKey, model, endpoint }
+ * @returns {{endpoint:string, apiKey:string, model:string, configured:boolean, source:string}} 配置
+ */
+export function resolveAIConfig(overrides = {}) {
+  const pick = (...vals) => vals.find((v) => typeof v === 'string' && v.trim().length > 0) ?? ''
+
+  const baseUrl = pick(overrides.baseUrl, process.env.AI_BASE_URL, process.env.STATION_LLM_BASE_URL)
+  const apiKey = pick(
+    overrides.apiKey,
+    process.env.AI_API_KEY,
+    process.env.ZHIPU_API_KEY,
+    process.env.STATION_LLM_API_KEY,
+  )
+  const model = pick(overrides.model, process.env.AI_MODEL, process.env.STATION_LLM_MODEL) || ZHIPU_MODEL
+
+  // baseUrl 形如 https://host/v1 —— 拼上 OpenAI 兼容的 /chat/completions
+  const endpoint = pick(
+    overrides.endpoint,
+    baseUrl ? `${baseUrl.replace(/\/+$/, '')}/chat/completions` : '',
+    ZHIPU_ENDPOINT,
+  )
+
+  let source = 'none'
+  if (overrides.apiKey || process.env.AI_API_KEY) source = 'AI_API_KEY'
+  else if (process.env.ZHIPU_API_KEY) source = 'ZHIPU_API_KEY'
+  else if (process.env.STATION_LLM_API_KEY) source = 'STATION_LLM_API_KEY（复用工作站配置）'
+
+  return { endpoint, apiKey, model, configured: Boolean(apiKey), source }
+}
 
 /** 送进 AI 的正文长度上限（字符）。太长既费钱又无必要。 */
 const AI_TEXT_LIMIT = 3000
@@ -225,10 +266,18 @@ export function defaultTagsFor(categories, taxonomy) {
  * @returns {Promise<{ok:boolean, summary:string, categories:string[], tags:string[], newTags:string[], error:string|null}>} 结果
  */
 export async function classifyWithAI(opts) {
-  const { title, text, taxonomy, apiKey } = opts
+  const { title, text, taxonomy } = opts
   const fail = (error) => ({ ok: false, summary: '', categories: [], tags: [], newTags: [], error })
 
-  if (!apiKey) return fail('未配置 ZHIPU_API_KEY')
+  const cfg = resolveAIConfig({
+    baseUrl: opts.baseUrl,
+    apiKey: opts.apiKey,
+    model: opts.model,
+    endpoint: opts.endpoint,
+  })
+  if (!cfg.configured) {
+    return fail('未配置 AI Key（可设 AI_API_KEY / ZHIPU_API_KEY，或复用工作站的 STATION_LLM_API_KEY）')
+  }
 
   const catList = taxonomy.categories.map((c) => `${c.name}（${c.desc}）`).join('\n')
   const tagList = taxonomy.tags.join('、')
@@ -251,14 +300,14 @@ ${String(text ?? '').slice(0, AI_TEXT_LIMIT) || '(无正文，请仅依据标题
 
   let res
   try {
-    res = await fetch(opts.endpoint || ZHIPU_ENDPOINT, {
+    res = await fetch(cfg.endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${cfg.apiKey}`,
       },
       body: JSON.stringify({
-        model: opts.model || ZHIPU_MODEL,
+        model: cfg.model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
         max_tokens: 600,
@@ -267,7 +316,7 @@ ${String(text ?? '').slice(0, AI_TEXT_LIMIT) || '(无正文，请仅依据标题
       signal: AbortSignal.timeout(opts.timeoutMs ?? 60000),
     })
   } catch (err) {
-    return fail(`AI 服务不可达：${err?.message ?? err}`)
+    return fail(`AI 服务不可达（${cfg.endpoint}）：${err?.message ?? err}`)
   }
 
   if (!res.ok) {
@@ -363,7 +412,7 @@ export async function classify(opts) {
     return [...set].slice(0, 8)
   }
 
-  const useAI = opts.useAI !== false && Boolean(opts.apiKey)
+  const useAI = opts.useAI !== false && resolveAIConfig({ apiKey: opts.apiKey }).configured
   if (!useAI) {
     return {
       categories: rules.categories,

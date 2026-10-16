@@ -21,7 +21,7 @@
 
 import { join } from 'node:path'
 import { loadEnv } from './env.mjs'
-import { loadTaxonomy, classify } from './lib/classify.mjs'
+import { loadTaxonomy, classify, resolveAIConfig } from './lib/classify.mjs'
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 
@@ -49,7 +49,11 @@ async function main() {
 
   console.log('▸ R_N_Database 重新分类\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
-  console.log(`  AI         ${opts.useAI ? (process.env.ZHIPU_API_KEY ? '启用' : '已请求但无 ZHIPU_API_KEY，将只用规则') : '关闭（仅规则）'}`)
+
+  const ai = resolveAIConfig()
+  console.log(`  AI         ${opts.useAI
+    ? (ai.configured ? `启用 · ${ai.model} · 密钥来源 ${ai.source}` : '已请求但未配置密钥，将只用规则')
+    : '关闭（仅规则）'}`)
 
   const taxonomy = loadTaxonomy(join(ROOT, 'config', 'taxonomy.json'))
   console.log(`  分类词表   ${taxonomy.categories.length} 类 / ${taxonomy.tags.length} 标签`)
@@ -88,7 +92,7 @@ async function main() {
       title: [doc.title, doc.originalName].filter(Boolean).join(' '),
       text: body,
       taxonomy,
-      apiKey: opts.useAI ? (process.env.ZHIPU_API_KEY || '') : '',
+      apiKey: '',
       useAI: opts.useAI,
     })
 
