@@ -73,8 +73,12 @@ export async function getAuthConfig() {
   //    现在环境变量每次都比对并覆盖，**部署环境里的值就是唯一真相**。
   //
   // 2. 没有 trim。网页表单里粘贴很容易带上尾随空格或换行，
-  //    于是 sha256('Raven_NULL ') ≠ sha256('Raven_NULL')，
+  //    于是 sha256('<密码> ') ≠ sha256('<密码>')，
   //    而客户端提交前会 trim —— 结果就是「密码完全正确却提示密码不正确」。
+  //
+  //    ⚠ 注意：**注释里不要写真实密码**。先前把用户的实际口令写进了这段注释，
+  //    结果被 Netlify 的 secrets scanning 拦下、并且公开在 GitHub 上。
+  //    这里的示例一律用占位符。
   const envToken = String(process.env.ADMIN_TOKEN ?? '').trim()
   if (envToken) {
     const envHash = sha256hex(envToken)

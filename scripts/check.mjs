@@ -21,6 +21,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { execFileSync } from 'node:child_process'
 import { officeEngineStatus } from './lib/office.mjs'
 
 const ROOT = process.cwd()
@@ -211,6 +212,95 @@ function checkOptionalTools() {
 }
 
 /* ============================================================
+   ⑥ 环境变量取值泄漏扫描（对齐 Netlify 的 secrets scanning）
+   ============================================================
+   踩过的坑：把用户的实际口令写进了代码注释，还写进了提交信息，
+   结果（a）Netlify 的 secrets scanning 直接让构建失败，
+       （b）密码公开在 GitHub 上，只能作废重设。
+
+   前五节的正则只认特定前缀（nfp_/sk- 等），认不出「随便起一个」的口令。
+   Netlify 的做法是拿**环境变量的值**去全文搜索 —— 这里照做，
+   这样在本地就能拦住，不必等推上去才被平台打回。
+
+   同时扫提交信息：泄漏经常发生在说明文字里（我就是这么栽的），
+   而提交信息不进工作区文件，只扫文件是抓不到的。
+   ============================================================ */
+
+/** 需要防泄漏的环境变量名。 */
+const SENSITIVE_ENV_KEYS = [
+  'ADMIN_TOKEN',
+  'NETLIFY_ACCESS_TOKEN',
+  'NETLIFY_BLOBS_TOKEN',
+  'ZHIPU_API_KEY',
+  'AI_API_KEY',
+  'DOCS_SIGN_SECRET',
+  'STATION_LLM_API_KEY',
+]
+
+/**
+ * 扫描当前环境里敏感变量的**值**是否出现在项目文件或提交信息里。
+ * @returns {void}
+ */
+function checkEnvValueLeaks() {
+  const values = []
+  for (const key of SENSITIVE_ENV_KEYS) {
+    const v = String(process.env[key] ?? '').trim()
+    // 太短的值容易误报（例如 "1111"），但不扫又漏；取 6 位以上
+    if (v.length >= 6) values.push({ key, value: v })
+  }
+
+  if (values.length === 0) {
+    note('环境变量泄漏扫描：当前环境没有配置敏感变量，跳过')
+  }
+
+  // ---- 工作区文件 ----
+  for (const file of walk(ROOT)) {
+    const rel = relative(ROOT, file).replace(/\\/g, '/')
+    if (rel === '.env.example') continue   // 模板文件只有占位符
+
+    let size = 0
+    try {
+      size = statSync(file).size
+    } catch {
+      continue
+    }
+    if (size > 512 * 1024) continue
+
+    let text
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    if (text.includes('\u0000')) continue
+
+    for (const { key, value } of values) {
+      if (text.includes(value)) {
+        fail(`环境变量 ${key} 的**值**出现在文件里：${rel}`
+          + '（Netlify 的 secrets scanning 会因此让构建失败，且该值已公开）')
+      }
+    }
+  }
+
+  // ---- 提交信息 ----
+  // 提交信息不进工作区文件，只扫文件抓不到 —— 而我恰恰是在这里泄漏的
+  try {
+    const log = execFileSync('git', ['log', '--all', '--format=%H%n%B'], {
+      cwd: ROOT, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
+    })
+    for (const { key, value } of values) {
+      if (log.includes(value)) {
+        fail(`环境变量 ${key} 的**值**出现在某条提交信息里`
+          + '（工作区扫描抓不到；需改写历史：git commit --amend / git filter-branch）')
+      }
+    }
+    note('环境变量泄漏扫描：已覆盖工作区文件与全部提交信息')
+  } catch (err) {
+    warn(`无法读取 git 提交信息，跳过提交信息扫描：${err?.message ?? err}`)
+  }
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 async function main() {
@@ -220,6 +310,7 @@ async function main() {
   await checkFunctions()
   checkNetlifyConfig()
   checkSecrets()
+  checkEnvValueLeaks()
   checkOptionalTools()
 
   for (const n of notes) console.log(`  · ${n}`)
