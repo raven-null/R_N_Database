@@ -165,7 +165,7 @@ async function screenshot(client, name) {
    列表页检查
    ============================================================ */
 
-/** 列表页要问的渲染事实。 */
+/** 列表页要问的渲染事实（含两个盒子的独立滚动能力）。 */
 const LIST_PROBE = `(() => {
   const box = (sel) => {
     const el = document.querySelector(sel)
@@ -177,29 +177,47 @@ const LIST_PROBE = `(() => {
     const el = document.querySelector(sel)
     return el ? getComputedStyle(el)[prop] : null
   }
+  const side = document.querySelector('.sidebar')
+  const main = document.querySelector('.main')
   const docs = [...document.querySelectorAll('.doc')]
+  const doc = document.documentElement
   return {
     viewport: { w: innerWidth, h: innerHeight },
-    scrollHeight: document.documentElement.scrollHeight,
+    bodyOverflow: getComputedStyle(document.body).overflow,
+    pageScrolls: doc.scrollHeight > innerHeight + 2,
+    pageScrollHeight: doc.scrollHeight,
+
     bodyBg: style('body', 'backgroundColor'),
-    bodyColor: style('body', 'color'),
-    bodyFont: style('body', 'fontFamily').slice(0, 46),
+    cssLoaded: style('body', 'backgroundColor') !== 'rgba(0, 0, 0, 0)',
+
     topbar: box('.topbar'),
     topbarPosition: style('.topbar', 'position'),
-    sidebar: box('.sidebar'),
-    results: box('.results'),
+
+    // 两个盒子
+    sidebarBox: box('.sidebar'),
+    mainBox: box('.main'),
+    layoutCols: style('.layout', 'gridTemplateColumns'),
+    gap: style('.layout', 'gap'),
+
+    sidebarBorder: style('.sidebar', 'borderTopWidth'),
+    mainBorder: style('.main', 'borderTopWidth'),
+    sidebarRadius: style('.sidebar', 'borderRadius'),
+    mainRadius: style('.main', 'borderRadius'),
+    sidebarOverflowY: style('.sidebar', 'overflowY'),
+    mainOverflowY: style('.main', 'overflowY'),
+
+    // 独立滚动能力
+    sidebarScrollH: side ? side.scrollHeight : null,
+    sidebarClientH: side ? side.clientHeight : null,
+    mainScrollH: main ? main.scrollHeight : null,
+    mainClientH: main ? main.clientHeight : null,
+
     docCount: docs.length,
-    firstDoc: box('.doc'),
     firstDocTitle: docs[0]?.querySelector('.doc-title')?.textContent?.trim() ?? null,
-    firstDocBadge: docs[0]?.querySelector('.type-badge')?.textContent?.trim() ?? null,
-    badgeColor: style('.type-badge', 'color'),
-    badgeRadius: style('.type-badge', 'borderRadius'),
     chipCount: document.querySelectorAll('.chip').length,
-    chipRadius: style('.chip', 'borderRadius'),
     stats: document.getElementById('stats')?.textContent?.trim() ?? null,
     searchBox: box('#search'),
-    cssLoaded: getComputedStyle(document.body).backgroundColor !== 'rgba(0, 0, 0, 0)',
-    linkHref: docs[0]?.getAttribute('href') ?? null,
+    listHeadPosition: style('.list-head', 'position'),
   }
 })()`
 
@@ -215,36 +233,72 @@ async function checkList(client) {
   const line = (label, value) => console.log(`  ${label.padEnd(22)} ${value}`)
 
   line('视口', `${r.viewport.w}×${r.viewport.h}`)
-  line('页面高度', `${r.scrollHeight}px`)
-  line('CSS 是否生效', r.cssLoaded ? `是（body 背景 ${r.bodyBg}）` : '★ 否 —— 背景透明，样式没加载')
-  line('正文颜色', r.bodyColor)
-  line('字体', r.bodyFont)
+  line('CSS 是否生效', r.cssLoaded ? `是（body 背景 ${r.bodyBg}）` : '★ 否 —— 样式没加载')
+  line('整页是否滚动', r.pageScrolls ? `★ 会滚动（内容 ${r.pageScrollHeight}px）` : '已锁定（滚动在盒子里）')
 
-  console.log('  ── 布局 ──')
-  line('顶栏', r.topbar ? `${r.topbar.w}×${r.topbar.h} @ y=${r.topbar.y}（${r.topbarPosition}）` : '缺失')
-  line('侧边栏', r.sidebar ? `${r.sidebar.w}px 宽` : '缺失')
-  line('结果区', r.results ? `${r.results.w}px 宽` : '缺失')
-  line('搜索框', r.searchBox ? `${r.searchBox.w}×${r.searchBox.h}` : '缺失')
+  console.log('  ── 两个盒子 ──')
+  line('布局列', `${r.layoutCols}（间距 ${r.gap}）`)
+  line('左侧盒子', r.sidebarBox ? `${r.sidebarBox.w}×${r.sidebarBox.h} @ x=${r.sidebarBox.x}` : '缺失')
+  line('右侧盒子', r.mainBox ? `${r.mainBox.w}×${r.mainBox.h} @ x=${r.mainBox.x}` : '缺失')
+  line('边框 / 圆角', `左 ${r.sidebarBorder}/${r.sidebarRadius}　右 ${r.mainBorder}/${r.mainRadius}`)
+  line('各自 overflow-y', `左 ${r.sidebarOverflowY}　右 ${r.mainOverflowY}`)
+  line('左盒子内容/可视高', `${r.sidebarScrollH} / ${r.sidebarClientH}`)
+  line('右盒子内容/可视高', `${r.mainScrollH} / ${r.mainClientH}`)
 
   console.log('  ── 内容 ──')
   line('文档卡片数', r.docCount)
-  line('首张卡片', r.firstDoc ? `${r.firstDoc.w}×${r.firstDoc.h} @ y=${r.firstDoc.y}` : '缺失')
   line('首条标题', r.firstDocTitle ?? '（空）')
-  line('首条格式徽标', `${r.firstDocBadge} / 色 ${r.badgeColor} / 圆角 ${r.badgeRadius}`)
   line('筛选切面数', r.chipCount)
-  line('切面圆角', r.chipRadius)
-  line('统计行', r.stats)
-  line('首条链接', r.linkHref)
+  line('统计行', `${r.stats}（position: ${r.listHeadPosition}）`)
+  line('搜索框', r.searchBox ? `${r.searchBox.w}×${r.searchBox.h}` : '缺失')
 
   const issues = []
   if (!r.cssLoaded) issues.push('CSS 未生效（body 背景透明）')
-  if (!r.topbar || r.topbar.h < 30) issues.push('顶栏高度异常，可能塌陷')
-  if (!r.sidebar || r.sidebar.w < 120) issues.push('侧边栏宽度异常')
-  if (!r.results || r.results.w < 400) issues.push('结果区宽度异常')
+  if (r.pageScrolls) issues.push('整页不该滚动，滚动应当发生在两个盒子里')
+  if (r.bodyOverflow !== 'hidden') issues.push(`body overflow 应为 hidden（现为 ${r.bodyOverflow}）`)
+  if (!r.sidebarBox || r.sidebarBox.w < 150) issues.push('左侧盒子宽度异常')
+  if (!r.mainBox || r.mainBox.w < 400) issues.push('右侧盒子宽度异常')
+  // 左右并排：右侧盒子应当明显在左侧盒子右边
+  if (r.sidebarBox && r.mainBox && r.mainBox.x <= r.sidebarBox.x + r.sidebarBox.w) {
+    issues.push('两个盒子不是左右并排')
+  }
+  if (r.sidebarBorder !== '1px' || r.mainBorder !== '1px') issues.push('两个盒子应当各有边框')
+  if (r.sidebarOverflowY !== 'auto' || r.mainOverflowY !== 'auto') issues.push('两个盒子应当各自 overflow-y:auto')
+  if (!r.mainScrollH || !r.mainClientH || r.mainScrollH <= r.mainClientH) {
+    issues.push('右侧盒子内容没有超出高度，无法验证独立滚动')
+  }
   if (r.docCount < 1) issues.push('没有渲染出任何文档卡片')
-  if (!r.firstDoc || r.firstDoc.h < 40) issues.push('文档卡片高度异常，可能塌陷')
   if (r.chipCount < 3) issues.push('筛选切面太少')
-  if (issues.length === 0) console.log('\n  ✓ 布局与样式检查通过，未发现塌陷或未生效')
+  if (r.listHeadPosition !== 'sticky') issues.push('统计行应当贴顶吸附')
+
+  // ---- 独立滚动：滚右边，左边不该跟着动 ----
+  if (r.sidebarScrollH > r.sidebarClientH) {
+    await evaluate(client, `document.querySelector('.main').scrollTop = 600`)
+    await new Promise((res) => setTimeout(res, 250))
+    const after = await evaluate(client, `({
+      mainTop: document.querySelector('.main').scrollTop,
+      sideTop: document.querySelector('.sidebar').scrollTop,
+      pageTop: window.scrollY,
+      docTop: document.scrollingElement.scrollTop,
+    })`)
+    line('滚右边 600px 后', `右 ${after.mainTop}　左 ${after.sideTop}　整页 ${after.docTop}`)
+    if (after.mainTop < 500) issues.push('右侧盒子没有真的滚动')
+    if (after.sideTop !== 0) issues.push('滚右边时左边跟着动了（未独立）')
+    if (after.docTop !== 0) issues.push('滚右边时整页也滚了（未独立）')
+  } else {
+    line('独立滚动验证', '左盒子内容未超屏，仅验证右盒子与整页互不影响')
+    await evaluate(client, `document.querySelector('.main').scrollTop = 600`)
+    await new Promise((res) => setTimeout(res, 250))
+    const after = await evaluate(client, `({
+      mainTop: document.querySelector('.main').scrollTop,
+      docTop: document.scrollingElement.scrollTop,
+    })`)
+    line('滚右边 600px 后', `右 ${after.mainTop}　整页 ${after.docTop}`)
+    if (after.mainTop < 500) issues.push('右侧盒子没有真的滚动')
+    if (after.docTop !== 0) issues.push('滚右边时整页也滚了（未独立）')
+  }
+
+  if (issues.length === 0) console.log('\n  ✓ 两个盒子独立滚动正常')
   else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
 
   const bytes = await screenshot(client, 'list')
