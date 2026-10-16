@@ -117,10 +117,16 @@ export function mountUpload(opts) {
       ${dupInLib.length ? `<br>· ${dupInLib.length} 个库里已有同样内容，入库时会自动去重` : ''}
       ${dupPending.length ? `<br>· ${dupPending.length} 个暂存区已有同样内容` : ''}
       <br><br>
-      <b>下一步</b>：文件还在暂存区，尚未入库。在本地运行：<br>
+      <b>下一步</b>：文件已存进<b>线上暂存区</b>（Netlify Blobs），尚未入库。
+      在本地运行：<br>
       <code>node scripts/process-pending.mjs</code>
-      <br><span class="dim">（重活 —— 抽正文、Office 转 PDF、分类打标 —— 必须在本地跑，
-      线上没有 LibreOffice）</span>
+      <br><span class="dim">
+        需要先在项目根目录的 <code>.env</code> 里配好
+        <code>SITE_ID</code> 与 <code>NETLIFY_ACCESS_TOKEN</code>，
+        本地脚本才连得上线上暂存区（否则它只看本地目录，会显示为空）。<br>
+        重活 —— 抽正文、Office 转 PDF、分类打标 —— 必须在本地跑，
+        线上函数没有 LibreOffice，也扛不住大文件。
+      </span>
       <br><br><button class="btn ghost" id="up-dismiss">知道了</button>
     </div>`
 

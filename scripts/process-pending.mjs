@@ -117,8 +117,33 @@ async function main() {
   const all = await readPending(store)
 
   if (all.length === 0) {
-    console.log('  暂存区是空的 —— 没有待入库的文件。')
-    console.log('  在网页上点「上传」添加文件后再跑本命令。\n')
+    const mode = resolveStoreMode()
+
+    console.log('  暂存区是空的 —— 没有待入库的文件。\n')
+
+    // ★ 最常见的困惑：在**线上站点**上传的文件存在 Netlify Blobs（云端），
+    //   而本地脚本默认只读本地目录。不说清楚的话，用户会以为上传丢了。
+    if (mode === 'local') {
+      console.log('  注意：网页上传的暂存区有两个，取决于你在哪上传的 ——')
+      console.log('    · 在线上站点上传 → 存在 Netlify Blobs（云端）')
+      console.log('    · 在本地 dev-server 上传 → 存在 .local-data/doc-inbox/')
+      console.log('')
+      console.log('  本次运行处于 local 模式，只看了本地目录。')
+      console.log('  要处理**线上**暂存区，需要在项目根目录建 .env 并填：')
+      console.log('')
+      console.log('      DOCS_STORE_MODE=remote')
+      console.log('      SITE_ID=<你的 Netlify 站点 ID>')
+      console.log('      NETLIFY_ACCESS_TOKEN=<你的 Personal Access Token>')
+      console.log('')
+      console.log('  两者都在 Netlify 后台拿：')
+      console.log('    SITE_ID              → 站点 Settings → General → Site ID')
+      console.log('    NETLIFY_ACCESS_TOKEN → User settings → Applications → New access token')
+      console.log('  （.env 已被 .gitignore 忽略，不会进 Git）')
+    } else {
+      console.log('  当前是 remote 模式（连的是 Netlify Blobs），线上暂存区确实为空。')
+      console.log('  在网页上点「上传」添加文件后再跑本命令。')
+    }
+    console.log('')
     return
   }
 
