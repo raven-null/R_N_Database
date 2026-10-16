@@ -438,6 +438,105 @@ async function checkEditor(client, id) {
 }
 
 /* ============================================================
+   Markdown 双视图检查
+   ============================================================ */
+
+/** 双视图要问的渲染事实（含 iframe 内部，同源可直接读）。 */
+const MD_PROBE = `(() => {
+  const box = (sel) => {
+    const el = document.querySelector(sel)
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { w: Math.round(r.width), h: Math.round(r.height) }
+  }
+  const btns = [...document.querySelectorAll('.mode-switch button')]
+  const frame = document.querySelector('#frame iframe')
+  let inner = null
+  try {
+    const d = frame?.contentDocument
+    if (d) {
+      inner = {
+        hasLineNo: !!d.querySelector('.ln'),
+        lineCount: d.querySelectorAll('.ln').length,
+        hasHeading: !!d.querySelector('h1, h2, h3'),
+        hasPre: !!d.querySelector('pre'),
+        hasTable: !!d.querySelector('table'),
+        bodyLen: d.body?.innerHTML?.length ?? 0,
+        fontFamily: d.querySelector('.src') ? getComputedStyle(d.querySelector('.src')).fontFamily.slice(0, 30) : null,
+      }
+    }
+  } catch (e) { inner = { error: String(e.message) } }
+  return {
+    modeButtons: btns.map(b => ({ text: b.textContent.trim(), on: b.classList.contains('on') })),
+    switchBox: box('.mode-switch'),
+    frameSrc: frame?.getAttribute('src') ?? null,
+    frameBox: box('#frame'),
+    inner,
+    topbarH: box('.view-topbar')?.h ?? null,
+  }
+})()`
+
+/**
+ * 检查 Markdown 双视图。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - Markdown 文档 id
+ * @param {string} title - 文档标题
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkMarkdown(client, id, title) {
+  console.log(`\n【Markdown 双视图 · ${String(title).slice(0, 20)}】`)
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+  await new Promise((r) => setTimeout(r, 900))   // 等 iframe 内容加载
+
+  const issues = []
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+
+  const render = await evaluate(client, MD_PROBE)
+  line('切换控件', render.modeButtons.map((b) => `${b.text}${b.on ? '●' : ''}`).join(' / '))
+  line('控件尺寸', render.switchBox ? `${render.switchBox.w}×${render.switchBox.h}` : '缺失')
+  line('iframe 地址', render.frameSrc?.replace(/token=[^&]*/, 'token=***') ?? '缺失')
+  line('渲染视图内容', render.inner
+    ? `标题 ${render.inner.hasHeading ? '有' : '无'} / 表格 ${render.inner.hasTable ? '有' : '无'} / 代码块 ${render.inner.hasPre ? '有' : '无'} / 行号 ${render.inner.lineCount}`
+    : '读不到 iframe')
+
+  if (render.modeButtons.length !== 2) issues.push('没有出现两个模式按钮')
+  if (!render.modeButtons.some((b) => b.text.includes('文本') && b.on)) issues.push('默认应停在「文本」模式')
+  if (render.inner?.hasLineNo) issues.push('渲染视图不该出现源码行号')
+  if (!render.inner?.hasHeading) issues.push('渲染视图没有渲染出标题')
+
+  // ---- 切到源码 ----
+  await evaluate(client, `[...document.querySelectorAll('.mode-switch button')].find(b => b.textContent.includes('源码'))?.click()`)
+  await new Promise((r) => setTimeout(r, 900))
+
+  const source = await evaluate(client, MD_PROBE)
+  line('切换后按钮', source.modeButtons.map((b) => `${b.text}${b.on ? '●' : ''}`).join(' / '))
+  line('切换后 iframe', source.frameSrc?.includes('mode=source') ? '已带 mode=source' : (source.frameSrc?.slice(0, 60) ?? '缺失'))
+  line('源码视图内容', source.inner
+    ? `行号 ${source.inner.lineCount} 行 / HTML 标题 ${source.inner.hasHeading ? '有（不该有）' : '无'} / 等宽 ${source.inner.fontFamily ?? '-'}`
+    : '读不到 iframe')
+
+  if (!source.modeButtons.some((b) => b.text.includes('源码') && b.on)) issues.push('点「源码」后按钮未高亮')
+  if (!(source.frameSrc ?? '').includes('mode=source')) issues.push('iframe 地址没有切到 mode=source')
+  if (!source.inner?.hasLineNo) issues.push('源码视图没有行号')
+  if ((source.inner?.lineCount ?? 0) < 2) issues.push(`源码视图行号太少（${source.inner?.lineCount}）`)
+  if (source.inner?.hasHeading) issues.push('源码视图不该渲染出 HTML 标题')
+
+  // 切回文本
+  await evaluate(client, `[...document.querySelectorAll('.mode-switch button')].find(b => b.textContent.includes('文本'))?.click()`)
+  await new Promise((r) => setTimeout(r, 700))
+  const back = await evaluate(client, MD_PROBE)
+  line('切回文本', back.inner?.hasLineNo ? '★ 仍是源码视图' : '已回到渲染视图')
+  if (back.inner?.hasLineNo) issues.push('切回「文本」后没有回到渲染视图')
+
+  if (issues.length === 0) console.log('\n  ✓ 双视图切换正常')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  await screenshot(client, 'md-render')
+  console.log('  截图已存 .shots/md-render.png')
+  return issues.length === 0
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 
@@ -484,6 +583,10 @@ async function main() {
     if (pdf) ok = (await checkView(client, pdf.id, 'PDF 内嵌预览', 'view-pdf')) && ok
     if (other) ok = (await checkView(client, other.id, `${other.type.toUpperCase()} 预览`, `view-${other.type}`)) && ok
     if (other) ok = (await checkEditor(client, other.id)) && ok
+
+    // Markdown 双视图
+    const md = list.data.items.find((d) => d.type === 'md')
+    if (md) ok = (await checkMarkdown(client, md.id, md.title)) && ok
   } finally {
     try {
       client?.ws.close()

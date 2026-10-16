@@ -33,6 +33,21 @@ const el = {
 let current = null
 
 /**
+ * Markdown 的双视图模式。
+ * 默认「渲染」—— 打开就能读；「源码」是代码格式（等宽 + 行号）。
+ */
+let mdMode = 'render'
+
+/**
+ * 该文档是否支持双视图。
+ * @param {object} doc - 元数据
+ * @returns {boolean} 是否支持
+ */
+function isDualView(doc) {
+  return doc?.previewKind === 'markdown'
+}
+
+/**
  * 渲染标题与元信息。
  * @param {object} doc - 元数据
  */
@@ -74,7 +89,14 @@ function renderHeader(doc) {
  * @param {boolean} canEdit - 是否有编辑权限
  */
 function renderActions(doc, canEdit) {
+  const dual = isDualView(doc)
+
   el.actions.innerHTML = `
+    ${dual ? `
+      <div class="mode-switch" role="group" aria-label="查看方式">
+        <button data-mode="render" class="${mdMode === 'render' ? 'on' : ''}">文本</button>
+        <button data-mode="source" class="${mdMode === 'source' ? 'on' : ''}">源码</button>
+      </div>` : ''}
     <a class="btn primary" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file`))}" download>下载</a>
     <button class="btn ghost" id="btn-info" aria-expanded="false">详情</button>
   `
@@ -86,6 +108,32 @@ function renderActions(doc, canEdit) {
 
   const infoBtn = document.getElementById('btn-info')
   infoBtn.addEventListener('click', () => togglePanel())
+
+  if (dual) {
+    el.actions.querySelectorAll('.mode-switch button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.mode === mdMode) return
+        mdMode = btn.dataset.mode
+        el.actions.querySelectorAll('.mode-switch button').forEach((b) => {
+          b.classList.toggle('on', b.dataset.mode === mdMode)
+        })
+        // 只换 iframe 的 src，不重建整个预览区 —— 切换更快也不闪
+        const frame = el.frame.querySelector('iframe')
+        if (frame) frame.src = previewSrc(current, mdMode)
+      })
+    })
+  }
+}
+
+/**
+ * 构造预览件地址。
+ * @param {object} doc - 元数据
+ * @param {string} [mode] - markdown 视图模式
+ * @returns {string} 带令牌的地址
+ */
+function previewSrc(doc, mode) {
+  const q = isDualView(doc) ? `?mode=${mode ?? mdMode}` : ''
+  return authedUrl(`/api/v1/docs/${doc.id}/preview${q}`)
 }
 
 /**
@@ -129,7 +177,7 @@ function renderPreview(doc) {
     return
   }
 
-  const src = authedUrl(`/api/v1/docs/${doc.id}/preview`)
+  const src = previewSrc(doc, mdMode)
 
   if (doc.previewKind === 'pdf') {
     el.frame.innerHTML = `<iframe class="pdf" src="${esc(src)}" title="文档预览"></iframe>`
@@ -140,10 +188,13 @@ function renderPreview(doc) {
     return
   }
 
-  // HTML / 文本预览
+  // Markdown / HTML / 文本预览
   el.frame.innerHTML = `<iframe class="html" src="${esc(src)}" title="文档预览" sandbox="allow-same-origin"></iframe>`
 
   const hints = []
+  if (doc.previewKind === 'markdown') {
+    hints.push(mdMode === 'source' ? '源码视图（等宽 + 行号）' : '渲染视图')
+  }
   if (doc.previewNote) hints.push(esc(doc.previewNote))
   if (/HTML 降级/.test(doc.previewNote ?? '')) hints.push('安装 LibreOffice 可转为保真度更高的 PDF 预览')
   if (hints.length) el.notice.innerHTML = `<div class="notice">${hints.join('　·　')}</div>`

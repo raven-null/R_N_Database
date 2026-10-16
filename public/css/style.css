@@ -433,12 +433,37 @@ body.view-page {
 }
 .icon-btn:hover { border-color: var(--accent); color: var(--text); }
 
-.actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.actions { display: flex; gap: 8px; flex: 0 0 auto; align-items: center; }
 .view-topbar .btn { padding: 6px 12px; font-size: 12.5px; }
 .btn.active {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* Markdown 双视图切换：文本 / 源码 */
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.mode-switch button {
+  padding: 6px 13px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background .14s, color .14s;
+}
+.mode-switch button + button { border-left: 1px solid var(--line); }
+.mode-switch button:hover { color: var(--text); background: var(--panel-2); }
+.mode-switch button.on {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
 }
 
 /* 提示条：只在有内容时占位，且尽量矮 */

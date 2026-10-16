@@ -12,6 +12,7 @@
     "exceljs": "^4.4.0",
     "jszip": "^3.10.2",
     "mammoth": "^1.13.0",
+    "marked": "^18.1.1",
     "pdfjs-dist": "^6.4.299",
     "pinyin-pro": "^3.29.5"
   },
@@ -27,7 +28,8 @@
     "test:classify": "node scripts/test-classify.mjs",
     "test:dom": "node scripts/dom-smoke-test.mjs",
     "test:api": "node scripts/test-write-api.mjs",
-    "test:render": "node scripts/render-check.mjs"
+    "test:render": "node scripts/render-check.mjs",
+    "test:markdown": "node scripts/test-markdown-view.mjs"
   },
   "devDependencies": {
     "jsdom": "^30.1.3"

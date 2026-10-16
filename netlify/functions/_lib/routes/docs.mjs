@@ -17,6 +17,16 @@ import {
 import { applyDocChange } from '../index-store.mjs'
 import { getDocsStore, STORES } from '../store.mjs'
 import { looksLikePinyin, matchesPinyin } from '../pinyin-match.mjs'
+import { renderSourcePage } from '../source-view.mjs'
+
+/**
+ * HTML 预览件的 CSP。
+ *
+ * 预览页是**用户文档内容**渲染出来的，必须当作不可信内容对待：
+ * 禁掉脚本与外部资源，只放行内联样式与 data: 图片。
+ * （iframe 上还有 sandbox，两层防护。）
+ */
+const HTML_PREVIEW_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
 
 /** 允许的排序方式。 */
 const SORTS = {
@@ -443,6 +453,41 @@ async function preview(req, url, id, auth) {
     }
   }
 
+  // Markdown：双视图（渲染 / 源码）
+  if (meta.previewKind === 'markdown') {
+    const mode = url.searchParams.get('mode') === 'source' ? 'source' : 'render'
+
+    if (mode === 'source') {
+      // ★ 源码视图读**原件**，而不是抽取出来的正文。
+      // 抽取时 cleanText 会压缩连续空格、去掉行首缩进、把多个空行并成一个 ——
+      // 那对检索无害，但会把代码缩进和列表层级毁掉，看源码就失真了。
+      // 原件本来就存在 doc-files 里，直接取原始字节最忠实。
+      const buf = await readDocFile(meta)
+      if (!buf) return notFound('原件缺失，无法显示源码', { req })
+      const source = Buffer.from(buf).toString('utf8')
+
+      return content(renderSourcePage(source, meta.title), {
+        req,
+        contentType: 'text/html; charset=utf-8',
+        headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
+        // 按需生成、成本低，不做长期缓存，避免与原件更新脱节
+        cacheControl: 'private, no-cache',
+      })
+    }
+
+    const p = await readPreview(id, 'html')
+    if (p) {
+      return content(p.body, {
+        req,
+        contentType: p.contentType,
+        inline: true,
+        headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
+        cacheControl: 'private, max-age=31536000, immutable',
+      })
+    }
+    return notFound('渲染件缺失，请重新入库该文档', { req })
+  }
+
   // HTML 降级预览件
   if (meta.previewKind === 'html') {
     const p = await readPreview(id, 'html')
@@ -451,9 +496,7 @@ async function preview(req, url, id, auth) {
         req,
         contentType: p.contentType,
         inline: true,
-        // HTML 预览页在 iframe 里加载，用 sandbox 隔离更稳妥，
-        // 这里通过响应头限制其能力
-        headers: { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:;" },
+        headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
         cacheControl: 'private, max-age=31536000, immutable',
       })
     }

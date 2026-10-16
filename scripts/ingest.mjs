@@ -31,6 +31,7 @@ import { loadEnv, loadExtraEnv, requireEnv } from './env.mjs'
 import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, isJunkTitle, mimeOf } from './lib/extract.mjs'
 import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
+import { renderMarkdownPage } from './lib/markdown.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
@@ -273,6 +274,8 @@ async function ingestOne(filePath, ctx) {
 
   // ---- 抽取 ----
   const extracted = await extractFile(abs, type)
+  // 标题提前算好：预览件渲染与分类都要用
+  const finalTitle = pickTitle(extracted.title, title)
 
   // ---- 分类打标 ----
   // 关键：把**文件名**与内嵌标题一起送进分类器。
@@ -322,9 +325,20 @@ async function ingestOne(filePath, ctx) {
         previewNote = 'HTML 降级（未安装 LibreOffice）'
       }
     }
-  } else if (['md', 'txt', 'csv'].includes(type)) {
+  } else if (type === 'md') {
+    // Markdown 双视图：渲染件在入库时生成并缓存；
+    // 源码视图（代码格式）由函数按需即时生成，不占存储。
+    //
+    // ★ 用**原件字节**渲染，而不是 extracted.text。
+    // 抽取时 cleanText 会压缩连续空格、去掉行首缩进、合并多个空行 ——
+    // 那对检索无害，但会让围栏代码块和列表层级在渲染视图里失真。
+    const rendered = renderMarkdownPage(buf.toString('utf8'), finalTitle)
+    await previewStore.set(`${id}.html`, rendered.html)
+    previewKind = 'markdown'
+    previewNote = rendered.ok ? '' : `渲染失败，已回退为纯文本：${rendered.error}`
+  } else if (type === 'txt' || type === 'csv') {
     if (extracted.html) {
-      await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, extracted.title || title))
+      await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, finalTitle))
       previewKind = 'html'
     } else {
       previewKind = 'text'
@@ -333,7 +347,6 @@ async function ingestOne(filePath, ctx) {
 
   // ---- 写入 ----
   const now = new Date().toISOString()
-  const finalTitle = pickTitle(extracted.title, title)
   const meta = {
     id,
     sha256: createHash('sha256').update(buf).digest('hex'),

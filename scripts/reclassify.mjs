@@ -15,6 +15,8 @@
  *   node scripts/reclassify.mjs              # 全库按规则重分
  *   node scripts/reclassify.mjs --dry-run    # 只报告变化，不写入
  *   node scripts/reclassify.mjs --ai         # 顺带用 AI 补摘要与分类
+ *   node scripts/reclassify.mjs --pinyin-only    # 只补拼音（派生字段）
+ *   node scripts/reclassify.mjs --previews-only  # 只重建预览件（如 Markdown 渲染件）
  *
  * @module scripts/reclassify
  */
@@ -23,6 +25,7 @@ import { join } from 'node:path'
 import { loadEnv } from './env.mjs'
 import { loadTaxonomy, classify, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
+import { renderMarkdownPage } from './lib/markdown.mjs'
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 
@@ -34,13 +37,17 @@ const ROOT = process.cwd()
  */
 function parseArgs() {
   const args = process.argv.slice(2)
-  const opts = { dryRun: false, useAI: false, limit: 0, onlyReview: false, force: false, pinyinOnly: false }
+  const opts = {
+    dryRun: false, useAI: false, limit: 0,
+    onlyReview: false, force: false, pinyinOnly: false, previewsOnly: false,
+  }
   for (const a of args) {
     if (a === '--dry-run') opts.dryRun = true
     else if (a === '--ai') opts.useAI = true
     else if (a === '--only-review') opts.onlyReview = true
     else if (a === '--force') opts.force = true
     else if (a === '--pinyin-only') opts.pinyinOnly = true
+    else if (a === '--previews-only') opts.previewsOnly = true
     else if (a.startsWith('--limit=')) opts.limit = Number(a.slice(8)) || 0
   }
   return opts
@@ -87,6 +94,8 @@ async function main() {
 
   const metaStore = await getDocsStore(STORES.META)
   const textStore = await getDocsStore(STORES.TEXT)
+  const filesStore = await getDocsStore(STORES.FILES)
+  const previewStore = await getDocsStore(STORES.PREVIEWS)
 
   // 读全库
   const all = []
@@ -105,8 +114,9 @@ async function main() {
   const base = opts.onlyReview ? all.filter((d) => d.needsReview) : all
 
   // 人工改过的默认跳过，除非 --force。
-  // --pinyin-only 例外：拼音是纯派生字段，补它不会覆盖任何人工判断。
-  const candidates = (opts.force || opts.pinyinOnly)
+  // --pinyin-only / --previews-only 例外：它们只刷新派生字段，
+  // 不会覆盖任何人工判断。
+  const candidates = (opts.force || opts.pinyinOnly || opts.previewsOnly)
     ? base
     : base.filter((d) => !isManuallyEdited(d))
   const skippedManual = base.length - candidates.length
@@ -114,6 +124,8 @@ async function main() {
 
   if (opts.pinyinOnly) {
     console.log(`  模式       仅补拼音（不改分类、不调 AI）`)
+  } else if (opts.previewsOnly) {
+    console.log(`  模式       仅重建预览件（Markdown 渲染件等；不改分类、不调 AI）`)
   }
   console.log(`  ${all.length} 份文档，本次处理 ${limited.length} 份${opts.dryRun ? '（dry-run）' : ''}`)
   if (manualCount > 0 && !opts.pinyinOnly) {
@@ -127,6 +139,8 @@ async function main() {
   const catCount = {}
   let processed = 0
   let added = 0
+  let rebuilt = 0
+  let missing = 0
 
   for (const doc of limited) {
     // ---- 仅补拼音模式：只更新派生字段，完全不碰分类与标签 ----
@@ -140,6 +154,32 @@ async function main() {
           updatedAt: new Date().toISOString(),
         }))
         if (!hadPinyin) added += 1
+      }
+      processed += 1
+      if (processed % 50 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
+      continue
+    }
+
+    // ---- 仅重建预览件模式 ----
+    if (opts.previewsOnly) {
+      if (doc.type === 'md') {
+        // ★ 用**原件字节**渲染，而不是抽取的正文：
+        // 抽取时 cleanText 会压缩空格、去掉行首缩进、合并空行，
+        // 那会让围栏代码块与列表层级在渲染视图里失真。
+        const buf = await filesStore.get(`${doc.id}.${doc.ext}`, { type: 'arrayBuffer' }).catch(() => null)
+        if (buf) {
+          const rendered = renderMarkdownPage(Buffer.from(buf).toString('utf8'), doc.title)
+          await previewStore.set(`${doc.id}.html`, rendered.html)
+          await metaStore.set(doc.id, JSON.stringify({
+            ...doc,
+            previewKind: 'markdown',
+            previewNote: rendered.ok ? '' : `渲染失败，已回退为纯文本：${rendered.error}`,
+            updatedAt: new Date().toISOString(),
+          }))
+          rebuilt += 1
+        } else {
+          missing += 1
+        }
       }
       processed += 1
       if (processed % 50 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
@@ -187,8 +227,14 @@ async function main() {
     if (processed % 50 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
   }
 
-  if (opts.pinyinOnly) {
-    console.log(`\n  处理完成：${processed} 份，其中 ${added} 份补上了拼音\n`)
+  // ---- 派生字段刷新模式的收尾（不改分类，索引也只需轻量重建） ----
+  if (opts.pinyinOnly || opts.previewsOnly) {
+    if (opts.pinyinOnly) {
+      console.log(`\n  处理完成：${processed} 份，其中 ${added} 份补上了拼音\n`)
+    } else {
+      console.log(`\n  处理完成：${processed} 份，重建预览件 ${rebuilt} 份`
+        + `${missing ? `，${missing} 份原件缺失已跳过` : ''}\n`)
+    }
     if (!opts.dryRun) {
       console.log('  重建索引…')
       const idx = await rebuildStoreIndex({
@@ -197,6 +243,7 @@ async function main() {
       })
       console.log(`  索引完成：${idx.docCount} 份 / ${idx.termCount} 词条`)
     }
+    if (env.loaded) console.log(`\n  已读取 .env（${env.keys.length} 个键）`)
     console.log('')
     return
   }
