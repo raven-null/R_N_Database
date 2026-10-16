@@ -16,6 +16,7 @@ import {
 } from '../repo.mjs'
 import { applyDocChange } from '../index-store.mjs'
 import { getDocsStore, STORES } from '../store.mjs'
+import { looksLikePinyin, matchesPinyin } from '../pinyin-match.mjs'
 
 /** 允许的排序方式。 */
 const SORTS = {
@@ -274,7 +275,10 @@ async function listDocs(req, url, auth) {
   // ---- 筛选 ----
   const q = (p.get('q') ?? '').trim().toLowerCase()
   if (q) {
+    // 拼音：纯 ASCII 查询额外匹配预算好的拼音串（jlxz → 简历第一版）
+    const pinyin = looksLikePinyin(q)
     docs = docs.filter((d) => {
+      if (pinyin && matchesPinyin(d, q)) return true
       const hay = [
         d.title, d.originalName, d.summary, d.author,
         ...(d.tags ?? []), ...(d.categories ?? []),
@@ -336,6 +340,7 @@ function toListItem(d) {
     categories: d.categories ?? [],
     tags: d.tags ?? [],
     summary: d.summary ?? '',
+    pinyin: d.pinyin ?? null,
     hasText: Boolean(d.hasText),
     needsReview: Boolean(d.needsReview),
     previewKind: d.previewKind,

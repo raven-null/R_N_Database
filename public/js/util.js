@@ -98,3 +98,42 @@ export function debounce(fn, ms = 180) {
 export function param(name) {
   return new URLSearchParams(location.search).get(name) ?? ''
 }
+
+/* ============================================================
+   拼音匹配
+   ============================================================ */
+
+/**
+ * 判断查询串是否像拼音（纯 ASCII 字母数字，至少 2 位）。
+ *
+ * 至少 2 位是刻意的：单字符走拼音几乎能匹配任何标题（「j」），只会添乱。
+ *
+ * 服务端有一份等价实现（netlify/functions/_lib/pinyin-match.mjs）。
+ * 刻意各留一份：函数打包不能跨出 netlify/functions/，浏览器也不能
+ * import 服务端模块，搞一个两边都用不上的"共享"模块没有意义。
+ *
+ * @param {string} q - 查询串
+ * @returns {boolean} 是否按拼音匹配
+ */
+export function looksLikePinyin(q) {
+  const s = String(q ?? '').trim().toLowerCase()
+  return s.length >= 2 && /^[a-z0-9]+$/.test(s)
+}
+
+/**
+ * 判断文档是否匹配拼音查询。
+ *
+ * 拼音串由入库时算好存在元数据里，因此前端无需加载 pinyin-pro
+ * （图库项目为此加载了 315KB）。
+ *
+ * @param {object} doc - 文档元数据
+ * @param {string} q - 查询串
+ * @returns {boolean} 是否命中
+ */
+export function matchesPinyin(doc, q) {
+  if (!looksLikePinyin(q)) return false
+  const p = doc?.pinyin
+  if (!p) return false
+  const s = String(q).trim().toLowerCase()
+  return String(p.full ?? '').includes(s) || String(p.initials ?? '').includes(s)
+}

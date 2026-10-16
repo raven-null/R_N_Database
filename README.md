@@ -127,6 +127,17 @@ DOCS_AI_ENV=E:\01-smart-workstation\.env
 
 前端筛选与即时搜索走本地（manifest 一次拉全库），只有按回车查正文时才打接口。
 
+### 拼音检索
+
+搜索框支持拼音：`jlxz` 或 `jianli` 都能找到「简历第一版」。
+
+实现方式是**入库时把拼音算好存进元数据**（`pinyin: { full, initials }`），
+前端只做纯字符串匹配 —— 因此**不需要加载 pinyin-pro**。
+图库项目为此在浏览器端加载了 315KB 的拼音库，这里省掉了。
+
+也可通过 API 使用：`GET /api/v1/docs?q=jlxz`。
+注意 `/api/v1/search`（全文检索）是纯文本的，不含拼音：前者查元数据，后者查正文。
+
 ## 部署流程（GitHub → Netlify 自动部署）
 
 ```

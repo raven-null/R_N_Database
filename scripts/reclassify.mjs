@@ -22,6 +22,7 @@
 import { join } from 'node:path'
 import { loadEnv } from './env.mjs'
 import { loadTaxonomy, classify, resolveAIConfig } from './lib/classify.mjs'
+import { pinyinForms } from './lib/pinyin.mjs'
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 
@@ -29,18 +30,41 @@ const ROOT = process.cwd()
 
 /**
  * 解析命令行参数。
- * @returns {{dryRun:boolean, useAI:boolean, limit:number, only:boolean}} 选项
+ * @returns {{dryRun:boolean, useAI:boolean, limit:number, onlyReview:boolean, force:boolean}} 选项
  */
 function parseArgs() {
   const args = process.argv.slice(2)
-  const opts = { dryRun: false, useAI: false, limit: 0, onlyReview: false }
+  const opts = { dryRun: false, useAI: false, limit: 0, onlyReview: false, force: false, pinyinOnly: false }
   for (const a of args) {
     if (a === '--dry-run') opts.dryRun = true
     else if (a === '--ai') opts.useAI = true
     else if (a === '--only-review') opts.onlyReview = true
+    else if (a === '--force') opts.force = true
+    else if (a === '--pinyin-only') opts.pinyinOnly = true
     else if (a.startsWith('--limit=')) opts.limit = Number(a.slice(8)) || 0
   }
   return opts
+}
+
+function pinyinSourceOf(doc) {
+  // 标题通常就是从文件名推出来的，直接拼会把同一串算两遍
+  // （实测得到 alibababianmaguifan alibababianmaguifan）
+  const base = String(doc?.originalName ?? '').replace(/\.[^.]+$/, '')
+  return [...new Set([doc?.title, base].filter(Boolean))].join(' ')
+}
+
+/**
+ * 判断这份文档是否被人工改过。
+ *
+ * ★ 批量任务绝不能覆盖人工策展。你在网页上把一份文档的分类改对、
+ * 把「待复查」清掉，一次 reclassify 就把成果冲掉，那编辑面板就白做了。
+ * 标了 manual 的文档默认跳过，要覆盖得显式加 --force。
+ *
+ * @param {object} doc - 文档元数据
+ * @returns {boolean} 是否人工编辑过
+ */
+function isManuallyEdited(doc) {
+  return String(doc?.classifySource ?? '').includes('manual')
 }
 
 async function main() {
@@ -56,8 +80,10 @@ async function main() {
     : '关闭（仅规则）'}`)
 
   const taxonomy = loadTaxonomy(join(ROOT, 'config', 'taxonomy.json'))
+  const strong = taxonomy._ambiguousKeywords?.strongWords ?? []
+  const mild = taxonomy._ambiguousKeywords?.mildWords ?? []
   console.log(`  分类词表   ${taxonomy.categories.length} 类 / ${taxonomy.tags.length} 标签`)
-  console.log(`  同形词     ${(taxonomy._ambiguousKeywords?.words ?? []).length} 个（正文折扣 ${taxonomy._ambiguousKeywords?.bodyWeight}）\n`)
+  console.log(`  同形词     ${strong.length} 强 + ${mild.length} 弱\n`)
 
   const metaStore = await getDocsStore(STORES.META)
   const textStore = await getDocsStore(STORES.TEXT)
@@ -75,16 +101,51 @@ async function main() {
     if (!cursor) break
   }
 
-  const targets = opts.onlyReview ? all.filter((d) => d.needsReview) : all
-  const limited = opts.limit > 0 ? targets.slice(0, opts.limit) : targets
+  const manualCount = all.filter(isManuallyEdited).length
+  const base = opts.onlyReview ? all.filter((d) => d.needsReview) : all
 
-  console.log(`  ${all.length} 份文档，本次处理 ${limited.length} 份${opts.dryRun ? '（dry-run）' : ''}\n`)
+  // 人工改过的默认跳过，除非 --force。
+  // --pinyin-only 例外：拼音是纯派生字段，补它不会覆盖任何人工判断。
+  const candidates = (opts.force || opts.pinyinOnly)
+    ? base
+    : base.filter((d) => !isManuallyEdited(d))
+  const skippedManual = base.length - candidates.length
+  const limited = opts.limit > 0 ? candidates.slice(0, opts.limit) : candidates
+
+  if (opts.pinyinOnly) {
+    console.log(`  模式       仅补拼音（不改分类、不调 AI）`)
+  }
+  console.log(`  ${all.length} 份文档，本次处理 ${limited.length} 份${opts.dryRun ? '（dry-run）' : ''}`)
+  if (manualCount > 0 && !opts.pinyinOnly) {
+    console.log(`  ⚠ 其中 ${manualCount} 份是人工编辑过的${opts.force
+      ? '（已用 --force 强制覆盖）'
+      : `，本次跳过 ${skippedManual} 份以免冲掉你的修改（要覆盖加 --force）`}`)
+  }
+  console.log('')
 
   const changes = []
   const catCount = {}
   let processed = 0
+  let added = 0
 
   for (const doc of limited) {
+    // ---- 仅补拼音模式：只更新派生字段，完全不碰分类与标签 ----
+    if (opts.pinyinOnly) {
+      const py = pinyinForms(pinyinSourceOf(doc)) ?? undefined
+      const hadPinyin = Boolean(doc.pinyin)
+      if (!opts.dryRun && (!hadPinyin || doc.pinyin?.full !== py?.full)) {
+        await metaStore.set(doc.id, JSON.stringify({
+          ...doc,
+          pinyin: py,
+          updatedAt: new Date().toISOString(),
+        }))
+        if (!hadPinyin) added += 1
+      }
+      processed += 1
+      if (processed % 50 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
+      continue
+    }
+
     const text = await textStore.get(doc.id, { type: 'json' }).catch(() => null)
     const body = (text?.pages ?? []).join('\n')
 
@@ -112,6 +173,8 @@ async function main() {
         needsReview: result.needsReview,
         classifySource: result.source,
         aiError: result.aiError,
+        // 顺带刷新拼音（早期入库的文档没有这个字段）
+        pinyin: pinyinForms(pinyinSourceOf(doc)) ?? undefined,
         updatedAt: new Date().toISOString(),
       }
       if (result.summary) next.summary = result.summary
@@ -122,6 +185,20 @@ async function main() {
 
     processed += 1
     if (processed % 50 === 0) console.log(`  · 已处理 ${processed}/${limited.length}`)
+  }
+
+  if (opts.pinyinOnly) {
+    console.log(`\n  处理完成：${processed} 份，其中 ${added} 份补上了拼音\n`)
+    if (!opts.dryRun) {
+      console.log('  重建索引…')
+      const idx = await rebuildStoreIndex({
+        taxonomy,
+        onProgress: (m) => console.log(`  · ${m}`),
+      })
+      console.log(`  索引完成：${idx.docCount} 份 / ${idx.termCount} 词条`)
+    }
+    console.log('')
+    return
   }
 
   console.log(`\n  处理完成：${processed} 份，其中 ${changes.length} 份分类发生变化\n`)

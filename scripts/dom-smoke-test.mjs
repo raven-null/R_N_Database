@@ -245,6 +245,24 @@ async function testListPage() {
     found.slice(0, 4).join(' | '),
   )
 
+  // ---- 拼音检索（前端零依赖：拼音串是入库时预算好的） ----
+  const pinyinDoc = allDocs.find((d) => d.pinyin?.initials && d.pinyin.initials.length >= 4)
+  if (!pinyinDoc) {
+    check(true, '（库中暂无带拼音的文档，跳过拼音检索检查）')
+  } else {
+    const py = pinyinDoc.pinyin.initials.slice(0, 4)
+    search.value = py
+    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+    await tick(400)
+
+    const hits = [...document.querySelectorAll('.doc-title')].map((e) => e.textContent.trim())
+    check(
+      hits.includes(pinyinDoc.title),
+      `拼音「${py}」命中「${pinyinDoc.title.slice(0, 20)}」（共 ${hits.length} 条）`,
+      hits.slice(0, 4).join(' | '),
+    )
+  }
+
   check(errors.length === 0, '运行期无 jsdom 报错', errors.join('\n      '))
   dom.window.close()
 }

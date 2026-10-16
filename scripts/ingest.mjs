@@ -30,6 +30,7 @@ import { basename, extname, join, relative, resolve } from 'node:path'
 import { loadEnv, loadExtraEnv, requireEnv } from './env.mjs'
 import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, isJunkTitle, mimeOf } from './lib/extract.mjs'
 import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
+import { pinyinForms } from './lib/pinyin.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
@@ -332,10 +333,13 @@ async function ingestOne(filePath, ctx) {
 
   // ---- 写入 ----
   const now = new Date().toISOString()
+  const finalTitle = pickTitle(extracted.title, title)
   const meta = {
     id,
     sha256: createHash('sha256').update(buf).digest('hex'),
-    title: pickTitle(extracted.title, title),
+    title: finalTitle,
+    // 拼音在入库时算好：前端就不必加载 315KB 的 pinyin-pro
+    pinyin: pinyinForms(`${finalTitle} ${name}`) ?? undefined,
     embeddedTitle: extracted.title || '',
     originalName: name,
     ext: extname(abs).toLowerCase().replace('.', ''),

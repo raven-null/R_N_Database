@@ -117,6 +117,7 @@ export async function manifestRoute(req, url) {
         categories: d.categories ?? [],
         tags: d.tags ?? [],
         summary: d.summary ?? '',
+        pinyin: d.pinyin ?? null,
         previewKind: d.previewKind,
         hasText: Boolean(d.hasText),
         needsReview: Boolean(d.needsReview),

@@ -10,7 +10,7 @@
 
 import { loadManifest, searchDocs, clearManifestCache, ApiError } from './api.js'
 import { fetchAuthStatus, login, setToken, clearToken, getToken } from './auth.js'
-import { esc, fmtSize, fmtDate, typeBadge, debounce } from './util.js'
+import { esc, fmtSize, fmtDate, typeBadge, debounce, looksLikePinyin, matchesPinyin } from './util.js'
 
 /** 应用状态。 */
 const state = {
@@ -63,10 +63,15 @@ function applyFilters(docs) {
 
   const q = state.q.trim().toLowerCase()
   if (q) {
-    out = out.filter((d) => [
-      d.title, d.originalName, d.summary, d.author,
-      ...(d.tags ?? []), ...(d.categories ?? []),
-    ].filter(Boolean).join(' ').toLowerCase().includes(q))
+    // 拼音：纯 ASCII 查询额外匹配元数据里预算好的拼音串（jlxz → 简历第一版）
+    const pinyin = looksLikePinyin(q)
+    out = out.filter((d) => {
+      if (pinyin && matchesPinyin(d, q)) return true
+      return [
+        d.title, d.originalName, d.summary, d.author,
+        ...(d.tags ?? []), ...(d.categories ?? []),
+      ].filter(Boolean).join(' ').toLowerCase().includes(q)
+    })
   }
 
   return [...out].sort(SORTERS[state.sort] ?? SORTERS.recent)
