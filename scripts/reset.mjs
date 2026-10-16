@@ -106,6 +106,9 @@ async function main() {
   }
 
   let total = 0
+  // 待上传暂存区也要清 —— 它是后来才加的 store，
+  // 早期版本的 reset 会漏掉它，留下孤儿原件
+  total += await wipe('待上传暂存', STORES.INBOX, opts)
   total += await wipe('原件', STORES.FILES, opts)
   total += await wipe('预览件', STORES.PREVIEWS, opts)
   total += await wipe('正文', STORES.TEXT, opts)

@@ -727,6 +727,66 @@ async function checkTools(client) {
   return issues.length === 0
 }
 
+/**
+ * 空库时的检查：此时用户看到的就是空状态，它本身也是一个该验证的界面。
+ * @param {object} client - CDP 客户端
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkEmptyState(client) {
+  console.log('\n【空库 · 空状态界面】')
+  await openPage(client, `${BASE}/`)
+  await new Promise((r) => setTimeout(r, 900))
+
+  const r = await evaluate(client, `(() => {
+    const box = (sel) => {
+      const el = document.querySelector(sel)
+      if (!el) return null
+      const b = el.getBoundingClientRect()
+      return { w: Math.round(b.width), h: Math.round(b.height) }
+    }
+    const empty = document.querySelector('#results .empty')
+    return {
+      docCount: document.querySelectorAll('.doc').length,
+      emptyText: empty?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 120) ?? null,
+      emptyBox: box('#results .empty'),
+      stats: document.getElementById('stats')?.textContent?.trim() ?? null,
+      chips: [...document.querySelectorAll('.chip')].map((c) => c.textContent.trim()).slice(0, 6),
+      hasUpload: !!document.getElementById('btn-upload'),
+      hasTagAdmin: !!document.getElementById('btn-tags'),
+      sidebarText: document.querySelector('.sidebar')?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 80) ?? null,
+      cssLoaded: getComputedStyle(document.body).backgroundColor !== 'rgba(0, 0, 0, 0)',
+      bodyOverflow: getComputedStyle(document.body).overflow,
+    }
+  })()`)
+
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+  line('文档卡片', `${r.docCount} 张（应为 0）`)
+  line('统计行', r.stats ?? '（无）')
+  line('空状态提示', r.emptyText ?? '★ 没有空状态提示')
+  line('空状态区域', r.emptyBox ? `${r.emptyBox.w}×${r.emptyBox.h}` : '缺失')
+  line('筛选切面', r.chips.join(' / ') || '（无）')
+  line('侧栏', r.sidebarText ?? '（无）')
+  line('上传 / 标签管理入口', `${r.hasUpload ? '有' : '无'} / ${r.hasTagAdmin ? '有' : '无'}`)
+  line('CSS / 整页滚动', `${r.cssLoaded ? '已生效' : '★ 未生效'} / ${r.bodyOverflow}`)
+
+  const issues = []
+  if (r.docCount !== 0) issues.push(`空库却渲染出 ${r.docCount} 张卡片`)
+  if (!r.emptyText) issues.push('空库时没有任何引导文案 —— 用户会看到一片空白')
+  if (!r.emptyText?.includes('上传') && !r.emptyText?.includes('ingest')) {
+    issues.push('空状态没有告诉用户怎么往里加文档')
+  }
+  if (!r.cssLoaded) issues.push('CSS 未生效')
+  if (r.bodyOverflow !== 'hidden') issues.push('整页滚动应当锁定')
+  if (!r.hasUpload) issues.push('空库时也该有上传入口')
+
+  if (issues.length === 0) console.log('\n  ✓ 空状态正常，且有明确的下一步引导')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'empty-state')
+  console.log(`  截图已存 .shots/empty-state.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
 /* ============================================================
    主流程
    ============================================================ */
@@ -762,6 +822,19 @@ async function main() {
     if (!page) throw new Error('没有可用的页面 target')
 
     client = await connectCdp(page.webSocketDebuggerUrl)
+
+    // 空库时「空状态」就是用户看到的界面，改验证它本身
+    const health = await (await fetch(`${BASE}/api/v1/health`)).json()
+    const docCount = health?.data?.docCount ?? 0
+    if (docCount === 0) {
+      console.log('\n  库是空的 —— 跳过依赖文档的检查，改验证空状态界面。')
+      console.log('  （想跑完整检查：先 node scripts/ingest.mjs "<目录>" 入库）')
+      const emptyOk = await checkEmptyState(client)
+      console.log('\n────────────────────────────────')
+      console.log(emptyOk ? '  ✓ 空状态检查通过' : '  ✗ 空状态存在问题')
+      console.log('')
+      process.exit(emptyOk ? 0 : 1)
+    }
 
     ok = (await checkList(client)) && ok
 
