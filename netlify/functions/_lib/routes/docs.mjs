@@ -411,7 +411,16 @@ async function originalFile(req, url, id, auth) {
  * GET /api/v1/docs/{id}/preview —— 预览件。
  *
  * PDF 直接回原件（浏览器原生渲染器是最好的 PDF 阅读器）；
- * 转换来的 PDF 与 HTML 降级件存在预览 store 里。
+ * 转换来的 PDF、Markdown 渲染件与 HTML 降级件存在预览 store 里。
+ *
+ * ★ 缓存策略按「URL 是否带版本号」分档：
+ * 预览件是**派生**产物，会被重新生成，而 URL 里的 id 是**原件**的内容哈希
+ * —— 预览件换了它不变。早期版本在这条路径上无脑标 immutable，
+ * 结果浏览器把旧的 HTML 降级版本缓存一年：装好 LibreOffice 重新生成
+ * PDF 预览后，用户看到的还是旧文字版，以为"和以前没区别"。
+ *
+ * 因此：带 ?v=（URL 已随预览件版本变化）→ 可长缓存；
+ *       不带 → 必须回源校验，避免旧书签永久卡在旧内容上。
  *
  * @param {Request} req - 请求
  * @param {URL} url - URL
@@ -426,6 +435,10 @@ async function preview(req, url, id, auth) {
     return forbidden('该文档未公开', { req })
   }
 
+  const VERSIONED_CACHE = url.searchParams.has('v')
+    ? 'private, max-age=31536000, immutable'
+    : 'private, no-cache'
+
   // PDF：原件即预览件
   if (meta.type === 'pdf') {
     const body = await readDocFile(meta)
@@ -435,7 +448,7 @@ async function preview(req, url, id, auth) {
       contentType: 'application/pdf',
       filename: meta.originalName,
       inline: true,
-      cacheControl: 'private, max-age=31536000, immutable',
+      cacheControl: VERSIONED_CACHE,
     })
   }
 
@@ -448,7 +461,7 @@ async function preview(req, url, id, auth) {
         contentType: 'application/pdf',
         filename: `${meta.title}.pdf`,
         inline: true,
-        cacheControl: 'private, max-age=31536000, immutable',
+        cacheControl: VERSIONED_CACHE,
       })
     }
   }
@@ -482,7 +495,7 @@ async function preview(req, url, id, auth) {
         contentType: p.contentType,
         inline: true,
         headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
-        cacheControl: 'private, max-age=31536000, immutable',
+        cacheControl: VERSIONED_CACHE,
       })
     }
     return notFound('渲染件缺失，请重新入库该文档', { req })
@@ -497,7 +510,7 @@ async function preview(req, url, id, auth) {
         contentType: p.contentType,
         inline: true,
         headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
-        cacheControl: 'private, max-age=31536000, immutable',
+        cacheControl: VERSIONED_CACHE,
       })
     }
   }

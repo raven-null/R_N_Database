@@ -340,6 +340,9 @@ const VIEW_PROBE = `(() => {
     downloadHref: [...document.querySelectorAll('.actions a')].find(a => a.textContent.includes('下载'))?.getAttribute('href') ?? null,
     frameKind: frame ? (frame.className || 'iframe') : null,
     frameSrc: frame ? frame.getAttribute('src')?.slice(0, 55) : null,
+    // ★ 预览地址必须带版本号：预览件是派生产物、会被重新生成，
+    // 而不带版本号的地址若标了 immutable，浏览器会永远用旧预览件
+    frameHasVersion: /[?&]v=/.test(frame?.getAttribute('src') ?? ''),
     // 页面是否还能滚动（文档优先布局应当锁住整页滚动）
     docScrollH: doc.scrollHeight,
     pageScrolls: doc.scrollHeight > innerHeight + 2,
@@ -369,6 +372,7 @@ async function checkView(client, id, label, shotName) {
   line('顶栏按钮', r.topbarButtons.join(' / '))
   line('下载链接', r.downloadHref ?? '缺失')
   line('预览类型', `${r.frameKind} → ${r.frameSrc}…`)
+  line('预览地址带版本号', r.frameHasVersion ? '是 ✓' : '★ 否 —— 会卡在旧预览件上')
   line('整页滚动', r.pageScrolls ? `★ 会滚动（文档高度 ${r.docScrollH}）` : '已锁定（文档区内部滚动）')
 
   const issues = []
@@ -381,6 +385,9 @@ async function checkView(client, id, label, shotName) {
   if (r.topbar && r.topbar.h > 60) issues.push(`顶栏过高（${r.topbar.h}px）`)
   if (r.panelHidden !== true) issues.push('详情面板默认应当是折叠的')
   if (r.pageScrolls) issues.push('整页不应滚动（应锁在文档区内滚动）')
+  if (!r.frameHasVersion) {
+    issues.push('预览地址未带版本号 —— 预览件重新生成后浏览器会一直用旧缓存')
+  }
   if (!r.downloadHref) issues.push('没有下载链接')
   if (issues.length === 0) console.log('\n  ✓ 文档优先布局正常')
   else issues.forEach((i) => console.log(`\n  ✗ ${i}`))

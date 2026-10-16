@@ -127,13 +127,29 @@ function renderActions(doc, canEdit) {
 
 /**
  * 构造预览件地址。
+ *
+ * ★ 必须带版本号。预览件是**派生**产物（Office 转 PDF、Markdown 渲染、
+ * HTML 降级），同一份原件的预览件会被重新生成 —— 而 URL 里的 id 是
+ * **原件**的内容哈希，预览件换了它不会变。
+ * 早期版本因此踩坑：预览地址标了 immutable 却不带版本号，
+ * 浏览器把旧的 HTML 降级版本缓存一年，重新生成 PDF 后用户永远看不到
+ * （装好 LibreOffice 升级预览件后，看起来"和以前没区别"就是这个原因）。
+ *
+ * 版本号取 updatedAt；重建预览件与人工编辑元数据都会更新它。
+ *
  * @param {object} doc - 元数据
  * @param {string} [mode] - markdown 视图模式
- * @returns {string} 带令牌的地址
+ * @returns {string} 带令牌与版本号的地址
  */
 function previewSrc(doc, mode) {
-  const q = isDualView(doc) ? `?mode=${mode ?? mdMode}` : ''
-  return authedUrl(`/api/v1/docs/${doc.id}/preview${q}`)
+  const params = new URLSearchParams()
+  if (isDualView(doc)) params.set('mode', mode ?? mdMode)
+  if (doc.updatedAt) {
+    const stamp = Date.parse(doc.updatedAt)
+    params.set('v', String(Number.isFinite(stamp) ? stamp : doc.updatedAt))
+  }
+  const q = params.toString()
+  return authedUrl(`/api/v1/docs/${doc.id}/preview${q ? `?${q}` : ''}`)
 }
 
 /**
