@@ -70,8 +70,10 @@ function buildHints(store, auth, rt, docCount) {
         : '本地 Blobs 不可用：若在本地开发，把 DOCS_STORE_MODE 设为 local。',
     )
   }
-  if (auth.failClosed) {
-    hints.push('线上尚未配置访问密码：请在 Netlify 环境变量里设置 ADMIN_TOKEN，否则所有请求都会被拒绝（刻意的 fail-closed 设计）。')
+  if (!auth.configured && rt.inLambda) {
+    hints.push('线上尚未配置访问密码：未登录访客只能看到标记为「公开」的文档'
+      + '（默认全部私有，所以现在什么也看不到），且任何人都无法上传或修改。'
+      + '要启用完整功能，请在 Netlify 环境变量里设置 ADMIN_TOKEN 后重新部署。')
   }
   if (store.ready && docCount === 0) {
     hints.push('存储可用但库是空的：运行 node scripts/ingest.mjs "<你的文档目录>" 开始入库。')

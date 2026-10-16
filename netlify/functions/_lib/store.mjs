@@ -23,7 +23,6 @@ import {
   readdirSync, unlinkSync, statSync,
 } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
-
 /** Blobs store 名称表。集中定义，避免各函数里散落字符串。 */
 export const STORES = {
   /** 原件（pdf/docx/xlsx/pptx）—— 唯一真相，下载走这里 */
@@ -49,7 +48,18 @@ export const STORES = {
   INBOX: 'doc-inbox',
 }
 
-const LOCAL_DIR = join(process.cwd(), '.local-data')
+/**
+ * 本地开发时的回退存储目录。
+ *
+ * 可用 `DOCS_LOCAL_DIR` 覆盖 —— 主要用于**测试隔离**：
+ * 测试常需要同时跑两个实例（一个无密码、一个带密码），
+ * 如果共用同一个目录，带密码的那个会把鉴权配置写进去，
+ * 无密码的那个也会跟着变成「已配密码」，测试结果就不可信了。
+ * （实测踩过：主实例突然只返回 0 份文档。）
+ */
+const LOCAL_DIR = process.env.DOCS_LOCAL_DIR
+  ? resolve(process.env.DOCS_LOCAL_DIR)
+  : join(process.cwd(), '.local-data')
 
 /**
  * 采集运行环境信号（只返回布尔量与版本号，绝不含密钥值）。

@@ -51,11 +51,8 @@ async function gate(req, url) {
   if (auth.ok && auth.role === 'admin') return { auth, response: null }
   return {
     auth,
-    response: auth.failClosed
-      ? forbidden('服务端尚未配置访问密码，已拒绝所有访问（fail-closed）', { req })
-      : auth.role
-        ? forbidden('上传需要管理员令牌', { req })
-        : unauthorized(auth.reason === 'BAD_TOKEN' ? '访问令牌无效' : '需要访问令牌', { req }),
+    // 上传是唯一需要登录的日常操作 —— 未登录访客只会看到明确的登录提示
+    response: forbidden('上传需要登录（管理员密码）', { req }),
   }
 }
 

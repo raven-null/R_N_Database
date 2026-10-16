@@ -12,19 +12,18 @@ import { ok, forbidden, unauthorized, serverError } from '../respond.mjs'
 import { readAllMeta, readIndexMeta, readTaxonomy, tally } from '../repo.mjs'
 
 /**
- * 统一鉴权：三个 meta 端点要求一致。
+ * 统一鉴权：分类词表与清单都只需 guest（未登录即可，
+ * 但只会看到标记为 public 的文档）。
  * @param {Request} req - 请求
  * @param {URL} url - URL
- * @returns {Promise<Response|null>} 失败时返回响应，成功返回 null
+ * @returns {Promise<object>} { auth, response }
  */
 async function gate(req, url) {
-  const auth = await checkAuth(req, url, 'read')
+  const auth = await checkAuth(req, url, 'guest')
   if (auth.ok) return { auth, response: null }
   return {
     auth,
-    response: auth.failClosed
-      ? forbidden('服务端尚未配置访问密码，已拒绝所有访问（fail-closed）', { req })
-      : unauthorized(auth.reason === 'BAD_TOKEN' ? '访问令牌无效' : '需要访问令牌', { req }),
+    response: unauthorized(auth.reason === 'BAD_TOKEN' ? '访问令牌无效' : '需要访问令牌', { req }),
   }
 }
 

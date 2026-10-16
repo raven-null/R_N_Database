@@ -51,17 +51,15 @@ const MAX_LIMIT = 200
  * @returns {Promise<Response>} 响应
  */
 export async function docsRoute(req, url, seg) {
-  // 写操作必须是 admin：read 令牌给工作站和博客用，不该能改资料
+  // 读只要 guest（未登录访客即可，但只会看到标记为 public 的文档）；
+  // 写必须是 admin —— read 令牌是给工作站和博客的，不该能改资料
   const isWrite = req.method === 'PATCH' || req.method === 'DELETE' || req.method === 'POST'
-  const auth = await checkAuth(req, url, isWrite ? 'admin' : 'read')
+  const auth = await checkAuth(req, url, isWrite ? 'admin' : 'guest')
 
   if (!auth.ok) {
-    return auth.failClosed
-      ? forbidden('服务端尚未配置访问密码，已拒绝所有访问（fail-closed）', { req })
+    return isWrite
+      ? forbidden('上传与修改需要登录（管理员密码）', { req })
       : unauthorized(describeAuthFailure(auth.reason), { req })
-  }
-  if (isWrite && auth.role !== 'admin') {
-    return forbidden('修改资料需要管理员令牌', { req })
   }
 
   try {
@@ -266,9 +264,9 @@ async function removeDoc(req, id, auth) {
  * @returns {string} 说明
  */
 function describeAuthFailure(reason) {
-  if (reason === 'NO_TOKEN') return '需要访问令牌（请求头 X-Auth-Token 或 ?token=）'
+  if (reason === 'NO_TOKEN' || reason === 'ANONYMOUS') return '需要访问令牌'
   if (reason === 'BAD_TOKEN') return '访问令牌无效'
-  if (reason === 'INSUFFICIENT_ROLE') return '当前令牌权限不足'
+  if (reason === 'INSUFFICIENT_ROLE') return '当前身份权限不足（未登录只能看已标记公开的文档）'
   return '未通过鉴权'
 }
 

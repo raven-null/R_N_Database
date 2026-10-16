@@ -23,11 +23,12 @@ const DEFAULT_LIMIT = 30
  * @returns {Promise<Response>} 响应
  */
 export async function searchRoute(req, url) {
-  const auth = await checkAuth(req, url, 'read')
+  // 读只要 guest（未登录即可，但只会命中标记为 public 的文档）
+  const auth = await checkAuth(req, url, 'guest')
   if (!auth.ok) {
-    return auth.failClosed
-      ? forbidden('服务端尚未配置访问密码，已拒绝所有访问（fail-closed）', { req })
-      : unauthorized(auth.reason === 'BAD_TOKEN' ? '访问令牌无效' : '需要访问令牌', { req })
+    return auth.role === 'guest' || auth.role === null
+      ? unauthorized(auth.reason === 'BAD_TOKEN' ? '访问令牌无效' : '需要访问令牌', { req })
+      : forbidden('当前身份权限不足', { req })
   }
 
   const q = (url.searchParams.get('q') ?? '').trim()

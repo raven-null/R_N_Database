@@ -31,7 +31,8 @@
     "test:render": "node scripts/render-check.mjs",
     "test:markdown": "node scripts/test-markdown-view.mjs",
     "process-pending": "node scripts/process-pending.mjs",
-    "test:batch": "node scripts/test-batch-tags.mjs"
+    "test:batch": "node scripts/test-batch-tags.mjs",
+    "test:access": "node scripts/test-access.mjs"
   },
   "devDependencies": {
     "jsdom": "^30.1.3"

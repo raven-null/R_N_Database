@@ -173,23 +173,39 @@ export async function checkAuth(req, url, required = 'guest') {
   const configured = Boolean(cfg.adminHash || cfg.readHash || cfg.guestHash)
   const isProd = runtimeInfo().inLambda
 
-  // ---- 情形一：根本没配密码 ----
-  if (!configured) {
-    if (isProd) {
-      // 私有资料库的正确默认值是拒绝，而不是放行
-      return { ok: false, role: null, reason: 'NO_PASSWORD_CONFIGURED', failClosed: true }
+  /**
+   * 结算：把「解析出的角色」与「所需角色」比较。
+   * @param {string} role - 解析出的角色
+   * @param {string} reason - 来源标记
+   * @returns {object} 鉴权结果
+   */
+  const settle = (role, reason) => {
+    if (RANK[role] < RANK[required]) {
+      return { ok: false, role, reason: 'INSUFFICIENT_ROLE', failClosed: false }
     }
-    return { ok: true, role: 'admin', reason: 'DEV_NO_GATE', failClosed: false }
+    return { ok: true, role, reason, failClosed: false }
+  }
+
+  // ---- 情形一：根本没配密码 ----
+  // 本地开发：直接给 admin，方便调试。
+  // 线上：降级为 guest（**不是**全站拒绝）——
+  //   未登录访客只能看到显式标记为 public 的文档，默认全部私有所以什么也看不到；
+  //   写入需要 admin，而没有任何密码能匹配上，因此上传等操作自动被拒。
+  //   这样既保留了「未配密码≠敞开」的安全性质，又不会把站点整个锁死。
+  if (!configured) {
+    if (!isProd) return { ok: true, role: 'admin', reason: 'DEV_NO_GATE', failClosed: false }
+    return settle('guest', 'NO_PASSWORD_CONFIGURED')
   }
 
   // ---- 情形二：签名 URL（给第三方抓取用，权限等同 read）----
-  if (await verifySignature(url)) {
-    return { ok: true, role: 'read', reason: 'SIGNATURE', failClosed: false }
-  }
+  if (await verifySignature(url)) return settle('read', 'SIGNATURE')
 
   // ---- 情形三：令牌比对 ----
   const token = tokenFrom(req, url)
-  if (!token) return { ok: false, role: null, reason: 'NO_TOKEN', failClosed: false }
+
+  // 未带令牌 = 未登录访客。解析为 guest 而不是直接拒绝 ——
+  // 由角色等级决定能不能做这件事：读公开文档放行，上传/改标签被拦。
+  if (!token) return settle('guest', 'ANONYMOUS')
 
   const hash = sha256hex(token)
   let role = null
@@ -199,15 +215,12 @@ export async function checkAuth(req, url, required = 'guest') {
 
   if (!role) return { ok: false, role: null, reason: 'BAD_TOKEN', failClosed: false }
 
-  if (RANK[role] < RANK[required]) {
-    return { ok: false, role, reason: 'INSUFFICIENT_ROLE', failClosed: false }
-  }
-  return { ok: true, role, reason: 'TOKEN', failClosed: false }
+  return settle(role, 'TOKEN')
 }
 
 /**
  * 鉴权状态摘要（供 /api/v1/health，只报状态不泄密）。
- * @returns {Promise<object>} { configured, hasAdmin, hasRead, hasGuest, failClosed }
+ * @returns {Promise<object>} { configured, hasAdmin, hasRead, hasGuest, canWrite }
  */
 export async function authStatus() {
   try {
@@ -218,10 +231,12 @@ export async function authStatus() {
       hasAdmin: Boolean(cfg.adminHash),
       hasRead: Boolean(cfg.readHash),
       hasGuest: Boolean(cfg.guestHash),
-      // 线上未配密码时会拒绝所有请求，这里明确标出来
-      failClosed: !configured && runtimeInfo().inLambda,
+      // 未登录访客能做什么：只能看显式标记为 public 的文档
+      anonymousRole: 'guest',
+      // 没有 admin 密码时谁都不能写入（上传、改标签等一律被拒）
+      canWrite: Boolean(cfg.adminHash),
     }
   } catch (err) {
-    return { configured: false, error: String(err?.message ?? err) }
+    return { configured: false, canWrite: false, error: String(err?.message ?? err) }
   }
 }

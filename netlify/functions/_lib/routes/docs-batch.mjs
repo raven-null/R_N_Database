@@ -40,11 +40,10 @@ async function gate(req, url) {
   if (auth.ok && auth.role === 'admin') return { auth, response: null }
   return {
     auth,
-    response: auth.failClosed
-      ? forbidden('服务端尚未配置访问密码，已拒绝所有访问（fail-closed）', { req })
-      : auth.role
-        ? forbidden('修改资料需要管理员令牌', { req })
-        : unauthorized(auth.reason === 'BAD_TOKEN' ? '访问令牌无效' : '需要访问令牌', { req }),
+    // 未登录访客与只读令牌都到不了这里
+    response: auth.role === 'admin'
+      ? forbidden('当前身份权限不足', { req })
+      : forbidden('批量操作与标签管理需要登录（管理员密码）', { req }),
   }
 }
 

@@ -9,7 +9,7 @@
  */
 
 import { checkAuth, authStatus, sha256hex, getAuthConfig, saveAuthConfig } from '../auth.mjs'
-import { ok, badRequest, unauthorized, forbidden, serverError } from '../respond.mjs'
+import { ok, badRequest, unauthorized, serverError } from '../respond.mjs'
 
 /**
  * 处理 /api/v1/auth 及其子路径。
@@ -26,11 +26,19 @@ export async function authRoute(req, url, seg) {
     if (action === 'status') {
       const status = await authStatus()
       const auth = await checkAuth(req, url, 'guest')
+
+      // ★ 「已登录」不能等同于「鉴权通过」。
+      // 未登录访客现在是 guest 角色，checkAuth 也会 ok:true ——
+      // 若直接拿 auth.ok 当 authenticated，匿名访客会被当成已登录，
+      // 前端就会显示「退出」而不是「登录」（实测踩过）。
+      // 只有真正出示了凭证（令牌/签名 URL）或本地开发免门禁才算已登录。
+      const authed = auth.ok && ['TOKEN', 'SIGNATURE', 'DEV_NO_GATE'].includes(auth.reason)
+
       return ok({
         ...status,
-        // 当前这个请求处于什么角色（前端据此显示编辑入口等）
         role: auth.ok ? auth.role : null,
-        authenticated: auth.ok,
+        anonymous: auth.reason === 'ANONYMOUS',
+        authenticated: authed,
       }, { req })
     }
 
@@ -54,9 +62,11 @@ export async function authRoute(req, url, seg) {
       const auth = await checkAuth(new Request(probe, { method: 'GET' }), probe, 'guest')
 
       if (!auth.ok) {
-        if (auth.failClosed) {
-          return forbidden('服务端尚未配置访问密码，请先在部署环境设置 ADMIN_TOKEN', { req })
-        }
+        return unauthorized('密码不正确', { req })
+      }
+      // 未登录访客本来就是 guest 角色，所以「登录成 guest」没有意义 ——
+      // 只有 admin / read 才算真的登录成功
+      if (auth.role === 'guest') {
         return unauthorized('密码不正确', { req })
       }
 

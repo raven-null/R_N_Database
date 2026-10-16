@@ -359,16 +359,22 @@ function render() {
 
 /**
  * 渲染登录状态区。
+ *
+ * 未登录**不再阻断浏览** —— 未登录访客是 guest 角色，只能看到
+ * 显式标记为「公开」的文档（默认全部私有，所以通常什么也看不到）。
+ * 上传与修改才需要登录。这里用一条不挡路的提示说清楚现状。
  */
 async function renderAuth() {
   const status = await fetchAuthStatus()
   state.auth = status
 
-  if (status.failClosed) {
-    el.banner.innerHTML = `<div class="banner error">
-      服务端尚未配置访问密码，已拒绝所有访问。<br>
-      <span class="dim">这是刻意的 fail-closed 设计：私有资料库在未设密码时应当拒绝访问，而不是敞开。
-      请在部署环境设置 ADMIN_TOKEN。</span>
+  // 线上未配密码：不是「全站拒绝」，而是「只能看公开文档 + 谁都不能上传」
+  if (!status.configured) {
+    el.banner.innerHTML = `<div class="banner warn">
+      服务端尚未配置访问密码。<br>
+      <span class="dim">现在未登录访客只能看到标记为「公开」的文档（默认全部私有，
+      所以可能什么也没有），且任何人都无法上传或修改。
+      要启用完整功能，请在 Netlify 环境变量里设置 ADMIN_TOKEN 后<b>重新部署</b>。</span>
     </div>`
   }
 
@@ -476,26 +482,30 @@ async function main() {
     render()
   })
 
-  if (el.banner.querySelector('.banner.error')) {
-    // fail-closed 时不必再去拉清单
-    el.results.innerHTML = '<div class="empty">等待配置访问密码。</div>'
-    return
-  }
-
   // ---- 上传（两阶段的第一阶段：只把原件存进暂存区）----
-  mountUpload({
-    button: el.btnUpload,
-    dropZone: el.results.closest('.main') ?? el.results,
-    banner: el.banner,
-    onChange: () => renderPendingList(),
-  })
-  renderPendingList()
+  // 上传是唯一需要登录的日常操作。未登录时不去挂上传逻辑，
+  // 而是点一下直接引导登录 —— 比让他选完文件再吃 403 友好得多。
+  const canWrite = state.auth?.authenticated === true
+  if (canWrite) {
+    mountUpload({
+      button: el.btnUpload,
+      dropZone: el.results.closest('.main') ?? el.results,
+      banner: el.banner,
+      onChange: () => renderPendingList(),
+    })
+    renderPendingList()
+  } else {
+    el.btnUpload.addEventListener('click', () => {
+      if (confirm('上传需要登录。现在去登录？')) showLoginDialog()
+    })
+    el.btnUpload.title = '上传需要登录'
+  }
 
   try {
     state.manifest = await loadManifest()
   } catch (err) {
     if (err instanceof ApiError && err.code === 'UNAUTHORIZED') {
-      el.results.innerHTML = `<div class="empty">需要登录才能查看资料库。<br>
+      el.results.innerHTML = `<div class="empty">需要访问令牌。<br>
         <span class="dim">点击右上角「登录」输入访问密码。</span></div>`
       return
     }
@@ -504,6 +514,11 @@ async function main() {
   }
 
   render()
+
+  // 未登录时说明「你看到的是公开文档」，避免误以为资料丢了
+  if (!canWrite) {
+    el.stats.textContent += '　·　未登录，只显示已标记公开的文档'
+  }
 }
 
 /**
