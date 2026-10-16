@@ -339,8 +339,10 @@ async function testViewPage() {
     )
 
     const notice = document.getElementById('notice')?.textContent ?? ''
+    // 引擎名会变（Office 桌面引擎 / LibreOffice / HTML 降级），
+    // 断言只要求「说明了预览件来源」，不写死具体引擎
     check(
-      notice.includes('LibreOffice') || notice.includes('HTML 降级') || notice.includes('渲染'),
+      /转换|降级|渲染/.test(notice),
       `PPTX：提示了预览件来源：${notice.slice(0, 90)}`,
     )
     // 只有 Markdown 才该带 mode 参数

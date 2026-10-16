@@ -26,7 +26,7 @@ import { loadEnv } from './env.mjs'
 import { loadTaxonomy, classify, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
-import { convertBytesToPdf, OFFICE_TYPES, libreOfficeStatus } from './lib/office.mjs'
+import { convertBytesToPdfDetailed, OFFICE_TYPES, officeEngineStatus } from './lib/office.mjs'
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 
@@ -127,7 +127,7 @@ async function main() {
     console.log(`  模式       仅补拼音（不改分类、不调 AI）`)
   } else if (opts.previewsOnly) {
     console.log(`  模式       仅重建预览件（Markdown 渲染件 / Office 转 PDF）`)
-    console.log(`  LibreOffice ${libreOfficeStatus()}`)
+    console.log(`  Office 转换 ${officeEngineStatus()}`)
   }
   console.log(`  ${all.length} 份文档，本次处理 ${limited.length} 份${opts.dryRun ? '（dry-run）' : ''}`)
   if (manualCount > 0 && !opts.pinyinOnly) {
@@ -144,6 +144,8 @@ async function main() {
   let rebuilt = 0
   let missing = 0
   let failed = 0
+  /** 各转换引擎实际处理了多少份（Office 桌面引擎 vs LibreOffice）。 */
+  const engines = {}
 
   for (const doc of limited) {
     // ---- 仅补拼音模式：只更新派生字段，完全不碰分类与标签 ----
@@ -183,19 +185,25 @@ async function main() {
         }))
         rebuilt += 1
       } else if (OFFICE_TYPES.has(doc.type)) {
-        // Office 文档：用 LibreOffice 转 PDF（版式/图片/图表全保留）。
-        // 这是安装 LibreOffice 后把已有文档升级为高保真预览的路径，
+        // Office 文档转 PDF（版式/图片/图表全保留）。
+        // 这是装好转换引擎后把已有文档升级为高保真预览的路径，
         // 不必重新抽取正文 —— 正文本来就没变。
-        const pdf = await convertBytesToPdf(buf, doc.ext)
+        //
+        // ★ 用 convertToPdfDetailed 而不是 convertBytesToPdf：
+        // 前者会告诉你**实际用了哪个引擎**（Office 桌面引擎 or LibreOffice），
+        // 两者保真度差异明显（LibreOffice 与 PowerPoint 排版引擎不同，
+        // 密集排版会文字溢出），把引擎记进元数据才能在网页上如实告知。
+        const { pdf, engine } = await convertBytesToPdfDetailed(buf, doc.ext)
         if (pdf) {
           await previewStore.set(`${doc.id}.pdf`, pdf)
           await metaStore.set(doc.id, JSON.stringify({
             ...doc,
             previewKind: 'pdf',
-            previewNote: 'LibreOffice 转换',
+            previewNote: engine === 'office' ? 'Office 桌面引擎转换' : 'LibreOffice 转换',
             updatedAt: new Date().toISOString(),
           }))
           rebuilt += 1
+          engines[engine] = (engines[engine] ?? 0) + 1
         } else {
           failed += 1
         }
@@ -252,7 +260,10 @@ async function main() {
     if (opts.pinyinOnly) {
       console.log(`\n  处理完成：${processed} 份，其中 ${added} 份补上了拼音\n`)
     } else {
-      console.log(`\n  处理完成：${processed} 份，重建预览件 ${rebuilt} 份`
+      const engineNote = Object.entries(engines).length
+        ? `（引擎：${Object.entries(engines).map(([k, v]) => `${k === 'office' ? 'Office 桌面' : k}=${v}`).join('，')}）`
+        : ''
+      console.log(`\n  处理完成：${processed} 份，重建预览件 ${rebuilt} 份${engineNote}`
         + `${failed ? `，失败 ${failed} 份` : ''}`
         + `${missing ? `，${missing} 份原件缺失已跳过` : ''}\n`)
     }

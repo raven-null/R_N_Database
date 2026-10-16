@@ -21,7 +21,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { findLibreOffice } from './lib/office.mjs'
+import { officeEngineStatus } from './lib/office.mjs'
 
 const ROOT = process.cwd()
 const FUNC_DIR = join(ROOT, 'netlify', 'functions')
@@ -196,17 +196,17 @@ function checkSecrets() {
 }
 
 /* ============================================================
-   ⑤ 可选工具探测（不影响构建成败）
+   ⑤ 转换引擎探测（不影响构建成败）
    ============================================================ */
 function checkOptionalTools() {
-  // 探测逻辑统一走 scripts/lib/office.mjs，避免候选路径在两处各写一份
-  const found = findLibreOffice()
-  if (found) {
-    note(`LibreOffice 已安装：${found}（Office 文档转高保真 PDF 预览）`)
+  // 探测逻辑统一走 scripts/lib/office.mjs，避免引擎判断在两处各写一份
+  const status = officeEngineStatus()
+  if (status.startsWith('可用')) {
+    note(`Office 转换 ${status}`)
   } else {
-    warn('未检测到 LibreOffice —— docx/xlsx/pptx 只能走 HTML 降级预览，'
-      + '版式/图片/图表会丢失（实测一份 21 页 PPT 只剩一堆 <li>）。'
-      + '装好后跑 node scripts/reclassify.mjs --previews-only 即可升级已有文档。')
+    warn(`Office 转换${status}。`
+      + '装 LibreOffice（或在本机用 Office 桌面版）即可获得 PDF 预览；'
+      + '就绪后跑 node scripts/reclassify.mjs --previews-only 升级已有文档。')
   }
 }
 

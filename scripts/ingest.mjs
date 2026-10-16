@@ -32,7 +32,7 @@ import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, 
 import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
-import { convertToPdf, findLibreOffice as findSoffice, libreOfficeStatus } from './lib/office.mjs'
+import { convertToPdfDetailed, findLibreOffice as findSoffice, officeEngineStatus } from './lib/office.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
@@ -267,20 +267,19 @@ async function ingestOne(filePath, ctx) {
     // PDF 本身就是最好的预览件，不必再存一份副本
     previewKind = 'pdf'
   } else if (['docx', 'xlsx', 'pptx'].includes(type)) {
-    // 优先走 LibreOffice 转 PDF（版式/图片/图表全部保留）；
-    // 未安装或转换失败才回退 HTML 降级。
-    // 先前实测：一份 21 页 PPT 走降级后只剩一堆 <li>，图片与排版全丢。
-    const pdf = await convertToPdf(abs)
+    // 优先用 Office 桌面应用自己的引擎导出 PDF（与桌面所见完全一致），
+    // 不可用时退回 LibreOffice。
+    // 先前实测：一份 21 页 PPT 走降级后只剩一堆 <li>，图片与排版全丢；
+    // 而 LibreOffice 与 PowerPoint 的排版引擎不同，密集排版会文字溢出。
+    const { pdf, engine } = await convertToPdfDetailed(abs)
     if (pdf) {
       await previewStore.set(`${id}.pdf`, pdf)
       previewKind = 'pdf'
-      previewNote = 'LibreOffice 转换'
+      previewNote = engine === 'office' ? 'Office 桌面引擎转换' : 'LibreOffice 转换'
     } else if (extracted.html) {
       await previewStore.set(`${id}.html`, wrapPreviewHtml(extracted.html, finalTitle))
       previewKind = 'html'
-      previewNote = findLibreOffice()
-        ? 'HTML 降级（LibreOffice 转换失败）'
-        : 'HTML 降级（未安装 LibreOffice，版式会丢失）'
+      previewNote = 'HTML 降级（无可用转换器，版式会丢失）'
     }
   } else if (type === 'md') {
     // Markdown 双视图：渲染件在入库时生成并缓存；

@@ -119,6 +119,9 @@ export async function manifestRoute(req, url) {
         summary: d.summary ?? '',
         pinyin: d.pinyin ?? null,
         previewKind: d.previewKind,
+        // 预览件由哪个引擎生成（Office 桌面引擎 / LibreOffice / HTML 降级），
+        // 保真度差异明显，调用方需要知道
+        previewNote: d.previewNote ?? '',
         hasText: Boolean(d.hasText),
         needsReview: Boolean(d.needsReview),
         ingestedAt: d.ingestedAt,
