@@ -1017,6 +1017,279 @@ async function checkContentEditor(client, id) {
 }
 
 /* ============================================================
+   Office 网页视图检查（Word / Excel / PowerPoint）
+   ============================================================ */
+
+/**
+ * Excel 表格视图要问的渲染事实。
+ *
+ * 重点是**钉住效果**：表头吸顶、冻结列贴左，这是表格视图存在的理由，
+ * 而它们只有真渲染才能验证（jsdom 不算布局，sticky 永远是 0）。
+ */
+const SHEET_PROBE = `(() => {
+  const box = (sel) => {
+    const el = document.querySelector(sel)
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), y: Math.round(r.y) }
+  }
+  const scroll = document.querySelector('.sheet-scroll')
+  const head = document.querySelector('.sheet-table-view thead td')
+  const frozen = document.querySelector('.sheet-table-view td.frozen-x')
+  const cells = [...document.querySelectorAll('.sheet-table-view td')]
+  const money = cells.find((c) => /^¥/.test(c.textContent))
+  const merged = document.querySelector('.sheet-table-view td[colspan]')
+  return {
+    buttons: [...document.querySelectorAll('.mode-switch button')].map((b) => ({ t: b.textContent.trim(), on: b.classList.contains('on') })),
+    tabs: [...document.querySelectorAll('.sheet-tab')].map((b) => ({ t: b.textContent.trim(), on: b.classList.contains('on') })),
+    hasView: Boolean(document.querySelector('.sheet-view')),
+    scrollBox: box('.sheet-scroll'),
+    scrollTop: scroll?.scrollTop ?? null,
+    scrollH: scroll?.scrollHeight ?? null,
+    clientH: scroll?.clientHeight ?? null,
+    scrollW: scroll?.scrollWidth ?? null,
+    clientW: scroll?.clientWidth ?? null,
+    headBox: box('.sheet-table-view thead td'),
+    headPos: head ? getComputedStyle(head).position : null,
+    headZ: head ? getComputedStyle(head).zIndex : null,
+    theadRows: document.querySelectorAll('.sheet-table-view thead tr').length,
+    bodyRows: document.querySelectorAll('.sheet-table-view tbody tr').length,
+    cellCount: cells.length,
+    frozenCount: document.querySelectorAll('.sheet-table-view td.frozen-x').length,
+    frozenBox: box('.sheet-table-view td.frozen-x'),
+    frozenPos: frozen ? getComputedStyle(frozen).position : null,
+    info: document.querySelector('.sheet-info')?.textContent?.trim() ?? null,
+    moneyText: money?.textContent ?? null,
+    moneyAlign: money ? getComputedStyle(money).textAlign : null,
+    mergedSpan: merged?.getAttribute('colspan') ?? null,
+    mergedText: merged?.textContent?.slice(0, 24) ?? null,
+    mergedW: merged ? Math.round(merged.getBoundingClientRect().width) : null,
+    // 拿一个**未合并**的格子做宽度基准（cells[0] 就是合并格本身，不能拿来比）
+    singleCellW: (() => {
+      const c = document.querySelector('.sheet-table-view tbody tr td')
+      return c ? Math.round(c.getBoundingClientRect().width) : null
+    })(),
+    tableW: (() => {
+      const t = document.querySelector('.sheet-table-view')
+      return t ? Math.round(t.getBoundingClientRect().width) : null
+    })(),
+    bodyBg: getComputedStyle(document.body).backgroundColor,
+    iframe: Boolean(document.querySelector('#frame iframe')),
+  }
+})()`
+
+/**
+ * 检查 Excel 表格视图。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - xlsx 文档 id
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkSheetView(client, id) {
+  console.log('\n【Excel 表格视图真实渲染】')
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+  await new Promise((r) => setTimeout(r, 1200))
+
+  const r = await evaluate(client, SHEET_PROBE)
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+  const issues = []
+
+  line('视图切换', r.buttons.map((b) => `${b.t}${b.on ? '●' : ''}`).join(' / '))
+  line('工作表标签', r.tabs.map((b) => `${b.t}${b.on ? '●' : ''}`).join(' / '))
+  line('规模', `${r.info}　表头 ${r.theadRows} 行 / 表体 ${r.bodyRows} 行`)
+  line('单元格数', r.cellCount)
+  line('表头定位', `${r.headPos}（z=${r.headZ}）`)
+  line('冻结列', `${r.frozenCount} 个（${r.frozenPos}）`)
+  line('滚动区', `${r.scrollW}×${r.scrollH} 内容 / ${r.clientW}×${r.clientH} 可视`)
+  line('货币单元格', `${r.moneyText}（text-align: ${r.moneyAlign}）`)
+  line('合并单元格', `${r.mergedText} colspan=${r.mergedSpan} 宽 ${r.mergedW}px（普通格 ${r.singleCellW}px，整表 ${r.tableW}px）`)
+
+  if (!r.hasView) issues.push('没有渲染出表格视图')
+  if (r.buttons.length !== 2) issues.push('视图切换按钮不是 2 个')
+  if (!r.buttons.some((b) => b.on && b.t.includes('表格'))) issues.push('默认视图应是「表格」')
+  if (r.tabs.length !== 2) issues.push(`工作表标签数异常（${r.tabs.length}）`)
+  if (r.bodyRows < 10) issues.push(`表体只渲染了 ${r.bodyRows} 行`)
+  if (r.headPos !== 'sticky') issues.push('表头应当 position: sticky')
+  if (!r.headBox || r.headBox.h < 14) issues.push('表头行高度异常')
+  if (!/right/.test(r.moneyAlign ?? '')) issues.push('数字/金额应当右对齐')
+  if (r.mergedSpan !== '5') issues.push(`合并单元格 colspan 应为 5（实际 ${r.mergedSpan}）`)
+  if (r.mergedW && r.singleCellW && r.mergedW <= r.singleCellW * 1.5) {
+    issues.push(`合并单元格没有跨列展开（合并 ${r.mergedW}px / 单格 ${r.singleCellW}px）`)
+  }
+  if (r.frozenCount < 1) issues.push('没有冻结列（夹具冻结了第 1 列）')
+  else if (r.frozenPos !== 'sticky') issues.push(`冻结列应当 position: sticky（实际 ${r.frozenPos}）`)
+  if (r.scrollH <= r.clientH) issues.push('表格内容没有超出可视高度，无法验证滚动')
+
+  // ★ 滚动后表头必须钉住（y 不变），内容动
+  if (r.scrollH > r.clientH) {
+    const before = r.headBox?.y ?? null
+    await evaluate(client, `document.querySelector('.sheet-scroll').scrollTop = 300`)
+    await new Promise((res) => setTimeout(res, 250))
+    const after = await evaluate(client, SHEET_PROBE)
+    line('滚动 300px 后', `表头 y ${before} → ${after.headBox?.y}　滚动量 ${after.scrollTop}`)
+    if (after.scrollTop < 250) issues.push('表格没有真的滚动')
+    if (before !== null && Math.abs((after.headBox?.y ?? 0) - before) > 2) {
+      issues.push(`表头没有钉住（y 从 ${before} 变到 ${after.headBox?.y}）`)
+    }
+  }
+
+  // 切到原始版式应当是 PDF 预览
+  await evaluate(client, `[...document.querySelectorAll('.mode-switch button')].find(b => b.textContent.includes('原始'))?.click()`)
+  await new Promise((res) => setTimeout(res, 1500))
+  const switched = await evaluate(client, `(() => {
+    const f = document.querySelector('#frame iframe')
+    return { cls: f?.className ?? null, src: f?.getAttribute('src') ?? null }
+  })()`)
+  line('切到原始版式', `${switched.cls} → ${(switched.src ?? '').replace(/token=[^&]*/, 'token=***').slice(0, 60)}`)
+  if (!switched.cls) issues.push('切到原始版式后没有预览')
+
+  if (issues.length === 0) console.log('\n  ✓ 表格视图正常（含表头钉住与滚动）')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'sheet-view')
+  console.log(`  截图已存 .shots/sheet-view.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
+/**
+ * Word / PPT 的网页视图要问的渲染事实（读 iframe 内部）。
+ */
+const WEBVIEW_PROBE = `(() => {
+  const frame = document.querySelector('#frame iframe')
+  const out = {
+    buttons: [...document.querySelectorAll('.mode-switch button')].map((b) => ({ t: b.textContent.trim(), on: b.classList.contains('on') })),
+    frameCls: frame?.className ?? null,
+    frameSrc: frame?.getAttribute('src') ?? null,
+    notice: document.getElementById('notice')?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 80) ?? '',
+    inner: null,
+  }
+  try {
+    const d = frame?.contentDocument
+    if (!d) return out
+    const de = d.documentElement
+    out.inner = {
+      // Word
+      sections: d.querySelectorAll('section.docx').length,
+      tables: d.querySelectorAll('table').length,
+      images: d.querySelectorAll('img').length,
+      paragraphs: d.querySelectorAll('p').length,
+      // PPT
+      svgs: d.querySelectorAll('svg').length,
+      foreignObjects: d.querySelectorAll('foreignObject').length,
+      slideBoxes: [...d.querySelectorAll('.slide')].map((s) => {
+        const r = s.getBoundingClientRect()
+        return { w: Math.round(r.width), h: Math.round(r.height) }
+      }),
+      textLen: (d.body?.textContent ?? '').replace(/\\s+/g, '').length,
+      textSample: (d.body?.textContent ?? '').replace(/\\s+/g, ' ').trim().slice(0, 60),
+      hOverflow: de ? de.scrollWidth - de.clientWidth : null,
+      bodyBg: d.body ? getComputedStyle(d.body).backgroundColor : null,
+      pageW: d.querySelector('section.docx') ? Math.round(d.querySelector('section.docx').getBoundingClientRect().width) : null,
+      iframeW: de ? de.clientWidth : null,
+    }
+  } catch (e) { out.inner = { error: String(e.message) } }
+  return out
+})()`
+
+/**
+ * 检查 Word 网页视图。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - docx 文档 id
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkWordView(client, id) {
+  console.log('\n【Word 网页视图真实渲染】')
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+  await new Promise((r) => setTimeout(r, 1200))
+
+  const r = await evaluate(client, WEBVIEW_PROBE)
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+  const issues = []
+  const inner = r.inner ?? {}
+
+  line('视图切换', r.buttons.map((b) => `${b.t}${b.on ? '●' : ''}`).join(' / '))
+  line('iframe 类型', r.frameCls)
+  line('页面结构', `section ${inner.sections} 个 / 段落 ${inner.paragraphs} / 表格 ${inner.tables} / 图片 ${inner.images}`)
+  line('正文长度', `${inner.textLen} 字：${inner.textSample ?? ''}`)
+  line('纸张宽度', `${inner.pageW}px（iframe 可视 ${inner.iframeW}px）`)
+  line('横向溢出', `${inner.hOverflow}px`)
+
+  if (!r.buttons.some((b) => b.on && b.t.includes('网页'))) issues.push('Word 默认视图应是「网页版」')
+  if (r.frameCls !== 'html') issues.push(`网页视图应是 html iframe（实际 ${r.frameCls}）`)
+  if (!(r.frameSrc ?? '').includes('view=web')) issues.push('iframe 地址没带 view=web')
+  if (!inner.sections) issues.push('docx-preview 的页面结构没出现')
+  if ((inner.paragraphs ?? 0) < 2) issues.push('段落太少')
+  if ((inner.tables ?? 0) < 1) issues.push('表格没渲染出来')
+  if ((inner.textLen ?? 0) < 10) issues.push('正文几乎是空的')
+  // 纸张比 iframe 宽就会横向滚 —— 那说明宽度没自适应
+  if (inner.pageW && inner.iframeW && inner.pageW > inner.iframeW + 2) {
+    issues.push(`纸张宽度超出 iframe（${inner.pageW} > ${inner.iframeW}）`)
+  }
+
+  if (issues.length === 0) console.log('\n  ✓ Word 网页视图正常')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'word-webview')
+  console.log(`  截图已存 .shots/word-webview.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
+/**
+ * 检查 PPT 网页视图。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - pptx 文档 id
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkSlidesView(client, id) {
+  console.log('\n【PPT 网页视图真实渲染】')
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+  await new Promise((r) => setTimeout(r, 1200))
+
+  const first = await evaluate(client, WEBVIEW_PROBE)
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+  const issues = []
+
+  // PPT 默认是 PDF，先确认这一点，再切到网页版
+  line('默认视图', first.buttons.map((b) => `${b.t}${b.on ? '●' : ''}`).join(' / '))
+  line('默认 iframe', first.frameCls)
+  if (!first.buttons.some((b) => b.on && b.t.includes('原始'))) {
+    issues.push('PowerPoint 默认视图应是「原始版式」（保真优先）')
+  }
+
+  await evaluate(client, `[...document.querySelectorAll('.mode-switch button')].find(b => b.textContent.includes('网页'))?.click()`)
+  await new Promise((r) => setTimeout(r, 1600))
+
+  const r = await evaluate(client, WEBVIEW_PROBE)
+  const inner = r.inner ?? {}
+  line('切到网页版', `${r.frameCls} → ${(r.frameSrc ?? '').replace(/token=[^&]*/, 'token=***').slice(0, 56)}`)
+  line('幻灯片', `${inner.svgs} 段 SVG / ${inner.foreignObjects} 个文本框`)
+  line('幻灯片尺寸', (inner.slideBoxes ?? []).map((b) => `${b.w}×${b.h}`).join(' '))
+  line('正文长度', `${inner.textLen} 字：${inner.textSample ?? ''}`)
+  line('提示', r.notice)
+
+  if (r.frameCls !== 'html') issues.push('切换后不是 html iframe')
+  if (!(r.frameSrc ?? '').includes('view=web')) issues.push('iframe 地址没带 view=web')
+  if ((inner.svgs ?? 0) < 3) issues.push(`SVG 数量不足（${inner.svgs}）`)
+  if ((inner.foreignObjects ?? 0) < 3) issues.push(`文本框数量不足（${inner.foreignObjects}）`)
+  if ((inner.textLen ?? 0) < 20) issues.push('幻灯片文字几乎是空的')
+  // 每张幻灯片都该是同比例、有实际尺寸
+  const boxes = inner.slideBoxes ?? []
+  if (boxes.length && boxes.some((b) => b.h < 30 || b.w < 60)) {
+    issues.push(`有幻灯片高度塌陷：${boxes.map((b) => `${b.w}×${b.h}`).join(' ')}`)
+  }
+  if (boxes.length) {
+    const ratio = boxes[0].w / boxes[0].h
+    if (Math.abs(ratio - 16 / 9) > 0.05) issues.push(`幻灯片比例不是 16:9（${ratio.toFixed(3)}）`)
+  }
+
+  if (issues.length === 0) console.log('\n  ✓ PPT 网页视图正常（SVG 内联、文字在、比例对）')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'pptx-webview')
+  console.log(`  截图已存 .shots/pptx-webview.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 
@@ -1066,8 +1339,8 @@ async function main() {
       ok = (await checkEmptyState(client)) && ok
     }
 
-    // 夹具始终造：代码/Markdown/PDF 三类的检查不能因为"库里恰好没有"而跳过
-    fixtures = await provisionFixtures({ root: ROOT, base: BASE, mark: MARK })
+    // 夹具始终造：代码/Markdown/PDF/Office 三件套的检查不能因为"库里恰好没有"而跳过
+    fixtures = await provisionFixtures({ root: ROOT, base: BASE, mark: MARK, office: true })
     console.log(`  夹具：${fixtures.ids.length} 份（${MARK}）`)
 
     ok = (await checkList(client)) && ok
@@ -1098,6 +1371,18 @@ async function main() {
     const md = byId(fixtures.byKind.md) ?? list.data.items.find((d) => d.type === 'md')
     if (md) ok = (await checkMarkdown(client, md.id, md.title)) && ok
 
+    // ★ Office 三件套的网页视图（不转 PDF 的那条路）
+    const docx = byId(fixtures.byKind.docx)
+    const xlsx = byId(fixtures.byKind.xlsx)
+    const pptx = byId(fixtures.byKind.pptx)
+    if (docx) ok = (await checkWordView(client, docx.id)) && ok
+    if (xlsx) ok = (await checkSheetView(client, xlsx.id)) && ok
+    if (pptx) ok = (await checkSlidesView(client, pptx.id)) && ok
+    if (!docx || !xlsx || !pptx) {
+      console.log('\n【Office 网页视图】\n  ✗ 缺少 Office 夹具（docx/xlsx/pptx 应各有一份）')
+      ok = false
+    }
+
     // 上传 / 多选 / 标签管理
     ok = (await checkTools(client)) && ok
 
@@ -1115,9 +1400,12 @@ async function main() {
         console.log('  ✗ 装了 LibreOffice 却仍走 HTML 降级 —— 版式会丢失')
         ok = false
       } else if (soffice) {
-        console.log('  ✓ 走 PDF 高保真预览')
+        console.log('  ✓ 入库时的预览件是 PDF（高保真那一档）')
         // ★ 必须先导航到这个文档，否则读到的是上一个检查残留的页面
         await openPage(client, `${BASE}/view.html?id=${office.id}`)
+        await new Promise((r2) => setTimeout(r2, 1200))
+        // 阅读页可能记住了上次选的视图，这里显式切回「原始版式」再断言
+        await evaluate(client, `[...document.querySelectorAll('.mode-switch button')].find(b => b.textContent.includes('原始'))?.click()`)
         await new Promise((r2) => setTimeout(r2, 1200))
         const r = await evaluate(client, `(() => {
           const f = document.querySelector('#frame iframe')
@@ -1125,11 +1413,11 @@ async function main() {
         })()`)
         console.log(`  iframe ${r.cls} → ${r.src}…`)
         if (r.cls !== 'pdf') {
-          console.log('  ✗ Office 文档没有用 PDF 渲染器')
+          console.log('  ✗ 「原始版式」没有用 PDF 渲染器')
           ok = false
         } else {
           const bytes = await screenshot(client, 'view-office')
-          console.log(`  ✓ 用 PDF 渲染器打开，截图 .shots/view-office.png（${(bytes / 1024).toFixed(1)}KB）`)
+          console.log(`  ✓ 原始版式用 PDF 渲染器打开，截图 .shots/view-office.png（${(bytes / 1024).toFixed(1)}KB）`)
         }
       } else {
         console.log('  · 未装 LibreOffice，此处只报告不断言')

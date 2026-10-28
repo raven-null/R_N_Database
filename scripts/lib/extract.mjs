@@ -74,6 +74,19 @@ const JUNK_TITLES = new Set([
 ])
 
 /**
+ * 生成工具留下的模板标题（前缀匹配）。
+ *
+ * 这些不是笔误：很多人用脚本/库生成文档，库会把**工具名**写进文档属性，
+ * 于是列表页上几十份文件全叫「PptxGenJS Presentation」。
+ * 实测：pptxgenjs 生成的演示文稿内嵌标题就是这串，
+ * 它会顶掉文件名，用户看到的是一堆一模一样的标题。
+ */
+const JUNK_TITLE_PREFIXES = [
+  'pptxgenjs', 'exceljs', 'jszip', 'docx4j', 'apache poi', 'aspose',
+  'reportlab', 'google docs', 'google 文档', '腾讯文档', '石墨文档',
+]
+
+/**
  * 判断内嵌标题是否是垃圾值。
  * @param {string} title - 候选标题
  * @returns {boolean} 是否应丢弃
@@ -85,6 +98,8 @@ export function isJunkTitle(title) {
   if (JUNK_TITLES.has(lower)) return true
   // "Microsoft Word - xxx" 形式的工具前缀
   if (/^(microsoft|wps|libreoffice|openoffice)\b/i.test(t)) return true
+  // 生成库写进文档属性的工具名
+  if (JUNK_TITLE_PREFIXES.some((p) => lower.startsWith(p))) return true
   // 纯数字/纯符号
   if (/^[\d\s._-]+$/.test(t)) return true
   // 看起来像 URL 或本地路径

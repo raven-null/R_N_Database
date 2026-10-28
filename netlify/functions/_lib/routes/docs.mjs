@@ -29,10 +29,13 @@ import { plainTextOf, countLines } from '../plain-text.mjs'
  * HTML 预览件的 CSP。
  *
  * 预览页是**用户文档内容**渲染出来的，必须当作不可信内容对待：
- * 禁掉脚本与外部资源，只放行内联样式与 data: 图片。
+ * 禁掉脚本与外部资源，只放行内联样式、data: 图片与 data: 字体。
  * （iframe 上还有 sandbox，两层防护。）
+ *
+ * `font-src data:` 是给 Word 网页视图用的：docx 内嵌字体以 data: URL 出现，
+ * 不放开的话那些文档会掉字体。仍然不允许任何网络来源。
  */
-const HTML_PREVIEW_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
+const HTML_PREVIEW_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:;"
 
 /** 允许的排序方式。 */
 const SORTS = {
@@ -651,6 +654,36 @@ async function preview(req, url, id, auth) {
   const VERSIONED_CACHE = url.searchParams.has('v')
     ? 'private, max-age=31536000, immutable'
     : 'private, no-cache'
+
+  // ---- 网页视图（Office 三件套：不经过 PDF 的那条路）----
+  //
+  // 与 PDF 预览并存而不是替代：纯网页渲染对复杂版式一定有偏差，
+  // 所以阅读页始终保留「原始版式」那一档。这里只负责按请求交付产物。
+  const view = String(url.searchParams.get('view') ?? '').trim()
+
+  if (view === 'web') {
+    if (meta.webView !== 'docx' && meta.webView !== 'pptx') {
+      return notFound('这份文档没有网页视图（只有 Word / PowerPoint 会生成）', { req })
+    }
+    const p = await readPreview(id, meta.webView === 'docx' ? 'web' : 'slides')
+    if (!p) return notFound('网页视图缺失，请重新入库该文档', { req })
+    return content(p.body, {
+      req,
+      contentType: p.contentType,
+      inline: true,
+      headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
+      cacheControl: VERSIONED_CACHE,
+    })
+  }
+
+  if (view === 'sheet') {
+    if (meta.webView !== 'sheet') {
+      return notFound('这份文档没有表格视图（只有 Excel 会生成）', { req })
+    }
+    const p = await readPreview(id, 'sheet')
+    if (!p) return notFound('表格视图缺失，请重新入库该文档', { req })
+    return ok(p.body, { req })
+  }
 
   // PDF：原件即预览件
   if (meta.type === 'pdf') {

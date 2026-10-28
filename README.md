@@ -103,6 +103,33 @@ Markdown、纯文本、CSV，以及约 60 种代码与配置文件后缀
 （`.ts .js .py .go .rs .java .sql .ps1 .json .yaml .toml .css .html .sh` 等）。
 代码只存、只看、只改，**永不执行**。
 
+### 三种格式的观看方式（不必都变成 PDF）
+
+阅读页顶部可以在两档之间切换。网页版是入库时在本地生成好的静态产物，
+线上不跑任何渲染器，所以没有等待、也不占函数体积：
+
+| 格式 | 默认 | 另一档 | 说明 |
+|---|---|---|---|
+| Word | **网页版** | 原始版式 | 段落/表格/图片/字体基本还原；公式与复杂文本框会简化 |
+| Excel | **表格** | 原始版式 | 原生表格：表头钉住、冻结列、可滚动、能整块复制 —— 比 PDF 好用得多 |
+| PowerPoint | 原始版式 | 网页版（实验） | 幻灯片是绝对坐标摆版式，开源渲染在字体度量上必有出入，保真优先 |
+
+"原始版式"始终是 Office 桌面引擎导出的 PDF。网页版是**加一档**，不是替换：
+复杂版式出现偏差时随时切回去。你的选择会按格式记住（同一类文档下次打开沿用）。
+
+渲染开销（本机实测，语料 3 页 PPT / 63 行 Excel / 一份 Word）：
+
+```
+docx 网页视图   216ms（首次 816ms，含 jsdom 加载）
+xlsx 表格模型     7ms
+pptx 网页视图    20ms
+作为对照：Office → PDF 单份 1.9–9.5 秒
+```
+
+网页版对文字内容不做取舍 —— 实测与 Office 转出的 PDF 逐条一致。
+代价是图片多的文档体积会涨（base64 内联约 +33%），
+超过 4MB 就跳过网页版、只保留原始版式（入库日志会写明原因）。
+
 ### 在网页上直接改内容
 
 代码 / Markdown / 纯文本可以在阅读页点「编辑内容」直接改写，保存后
@@ -165,18 +192,20 @@ npm run test:access        # 访问控制回归（37 项，自带隔离实例）
 npm run test:api           # 写操作回归（30 项）
 npm run test:batch         # 批量打标签/改分类（49 项）
 npm run test:edit          # 内容编辑：原件/正文/预览/索引全链路（54 项）
+npm run test:office        # Office 网页视图：Word/Excel/PPT 与 PDF 对照（47 项）
 npm run test:markdown      # Markdown 双视图（21 项）
 npm run test:dom           # 前端 jsdom 冒烟（55 项）
 npm run test:render        # 真实浏览器渲染检查（CDP，含截图）
 ```
 
-依赖服务器的几项（`test:api` / `test:batch` / `test:edit` / `test:markdown` /
-`test:dom`）需要先 `npm run dev`。
+依赖服务器的几项（`test:api` / `test:batch` / `test:edit` / `test:office` /
+`test:markdown` / `test:dom`）需要先 `npm run dev`。
 
 两条约定：
 
-- **前端测试自己造夹具**（`scripts/lib/fixtures.mjs`：一份代码、一份 Markdown、
-  一页手搓的最小 PDF），跑完即删 —— 不依赖库里恰好有什么，也不碰真实资料。
+- **前端测试自己造夹具**（`scripts/lib/fixtures.mjs`：代码、Markdown、手搓的最小 PDF，
+  以及可选的一份 Word / Excel / PowerPoint），跑完即删 ——
+  不依赖库里恰好有什么，也不碰真实资料。
 - **断言不写死语料**。写死「简历第一版」这类标题的测试，在库里内容一变就全崩。
 
 ## 部署流程（GitHub → Netlify 自动部署）
@@ -277,6 +306,8 @@ GET  /api/v1/docs/{id}           元数据
 GET  /api/v1/docs/{id}/text      抽取正文（给 AI 用，支持 ?maxChars=）
 GET  /api/v1/docs/{id}/file      原件（支持 Range，附件下载）
 GET  /api/v1/docs/{id}/preview   预览件（内联，PDF/HTML）
+     └ ?view=web                 Word/PPT 网页视图（入库时生成）
+     └ ?view=sheet               Excel 表格数据（JSON）
 GET  /api/v1/search?q=           全文检索（BM25，带命中片段与页码）
 GET  /api/v1/taxonomy            分类树 + 标签表（含计数）
 GET  /api/v1/manifest            全量清单 + 索引版本（支持 ETag → 304）

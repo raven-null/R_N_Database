@@ -68,17 +68,39 @@ export async function readDocFile(meta) {
 
 /**
  * 取预览件。
+ *
+ * 预览件有五种形态，key 后缀不同：
+ *   pdf    → `<id>.pdf`         Office 转出的 PDF / 原件本身
+ *   html   → `<id>.html`        Markdown/代码/HTML 降级 的渲染件
+ *   web    → `<id>.web.html`    Word 的网页视图（docx-preview 渲染）
+ *   slides → `<id>.slides.html` PPT 的网页视图（每张一段内联 SVG）
+ *   sheet  → `<id>.sheet.json`  Excel 的结构化表格数据
+ *
+ * 后三种由入库脚本生成，是「不转 PDF 也能看」的那条路。
+ *
  * @param {string} id - 文档 id
- * @param {'pdf'|'html'} kind - 预览类型
+ * @param {'pdf'|'html'|'web'|'slides'|'sheet'} kind - 预览类型
  * @returns {Promise<{body:*, contentType:string}|null>} 预览内容
  */
 export async function readPreview(id, kind) {
   const store = await getDocsStore(STORES.PREVIEWS)
+
   if (kind === 'pdf') {
     const buf = await store.get(`${id}.pdf`, { type: 'arrayBuffer' }).catch(() => null)
     return buf ? { body: buf, contentType: 'application/pdf' } : null
   }
-  const html = await store.get(`${id}.html`, { type: 'text' }).catch(() => null)
+  if (kind === 'sheet') {
+    const model = await store.get(`${id}.sheet.json`, { type: 'json' }).catch(() => null)
+    return model ? { body: model, contentType: 'application/json; charset=utf-8' } : null
+  }
+
+  const key = kind === 'web'
+    ? `${id}.web.html`
+    : kind === 'slides'
+      ? `${id}.slides.html`
+      : `${id}.html`
+
+  const html = await store.get(key, { type: 'text' }).catch(() => null)
   return html ? { body: html, contentType: 'text/html; charset=utf-8' } : null
 }
 

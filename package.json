@@ -33,11 +33,16 @@
     "test:markdown": "node scripts/test-markdown-view.mjs",
     "test:edit": "node scripts/test-content-edit.mjs",
     "test:index": "node scripts/test-index-delta.mjs",
+    "test:office": "node scripts/test-office-views.mjs",
     "process-pending": "node scripts/process-pending.mjs",
     "test:batch": "node scripts/test-batch-tags.mjs",
     "test:access": "node scripts/test-access.mjs"
   },
   "devDependencies": {
-    "jsdom": "^30.1.3"
+    "@pagus-kit/core": "^0.1.1",
+    "@pagus-kit/renderer": "^0.1.1",
+    "docx-preview": "^0.4.1",
+    "jsdom": "^30.1.3",
+    "pptxgenjs": "^4.0.1"
   }
 }

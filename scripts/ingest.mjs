@@ -34,6 +34,8 @@ import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
 import { renderCodePage } from '../netlify/functions/_lib/code-view.mjs'
+import { renderDocxHtml, renderPptxHtml } from './lib/preview-web.mjs'
+import { buildSheetModel } from './lib/sheet.mjs'
 import { convertToPdfDetailed, findLibreOffice as findSoffice, officeEngineStatus } from './lib/office.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
@@ -275,6 +277,11 @@ export async function ingestOne(filePath, ctx, override = {}) {
   let previewNote = ''
   const previewStore = await store(STORES.PREVIEWS)
 
+  // 网页视图（不经过 PDF 的另一条路）。见 scripts/lib/preview-web.mjs 的说明。
+  let webView = null
+  let webViewNote = ''
+  let webViewStats = null
+
   if (type === 'pdf') {
     // PDF 本身就是最好的预览件，不必再存一份副本
     previewKind = 'pdf'
@@ -323,6 +330,20 @@ export async function ingestOne(filePath, ctx, override = {}) {
     }
   }
 
+  // ---- 网页视图（Office 三件套：不转 PDF 也能看）----
+  // 与 PDF 预览件并存，而不是替代：PDF 始终是「原始版式」的兜底，
+  // 因为纯网页渲染对复杂版式一定有偏差。
+  if (['docx', 'xlsx', 'pptx'].includes(type)) {
+    const web = await buildWebView(type, buf, {
+      title: finalTitle,
+      previewStore,
+      id,
+    })
+    webView = web.kind
+    webViewNote = web.note
+    webViewStats = web.stats
+  }
+
   // ---- 写入 ----
   const now = new Date().toISOString()
   const meta = {
@@ -358,6 +379,10 @@ export async function ingestOne(filePath, ctx, override = {}) {
     extractError: extracted.error,
     previewKind,
     previewNote,
+    // 网页视图：word/docx → 'docx'，ppt → 'pptx'，excel → 'sheet'
+    webView,
+    webViewNote: webViewNote || undefined,
+    webViewStats: webViewStats || undefined,
   }
 
   const filesStore = await store(STORES.FILES)
@@ -385,9 +410,64 @@ export async function ingestOne(filePath, ctx, override = {}) {
     tags: meta.tags,
     previewKind,
     previewNote,
+    webView,
+    webViewNote: webViewNote || undefined,
     textChars: meta.textChars,
     needsReview: meta.needsReview,
   }
+}
+
+/**
+ * 生成 Office 文件的「网页视图」并写入预览 store。
+ *
+ * 三种格式各有各的最佳形态：
+ *   docx → 静态 HTML（docx-preview 在 jsdom 里渲染一次，图片内联）
+ *   xlsx → 结构化表格数据（前端画成表头吸顶、可滚动的表格）
+ *   pptx → 每张幻灯片一段内联 SVG
+ *
+ * 失败不抛异常：网页视图是**锦上添花**，它挂了不该让整份文档入库失败 ——
+ * PDF 预览件仍在，阅读页会自动只显示「原始版式」。
+ *
+ * @param {string} type - docx / xlsx / pptx
+ * @param {Buffer} buf - 原件内容
+ * @param {object} opts - { title, previewStore, id }
+ * @returns {Promise<{kind:string|null, note:string, stats:object|null}>} 结果
+ */
+async function buildWebView(type, buf, opts) {
+  const { title, previewStore, id } = opts
+
+  try {
+    if (type === 'docx') {
+      const r = await renderDocxHtml(buf, { title })
+      if (!r.ok) return { kind: null, note: `网页视图未生成：${r.error}`, stats: null }
+      await previewStore.set(`${id}.web.html`, r.html)
+      return { kind: 'docx', note: r.stats?.note ?? '', stats: r.stats }
+    }
+
+    if (type === 'pptx') {
+      const r = await renderPptxHtml(buf, { title })
+      if (!r.ok) return { kind: null, note: `网页视图未生成：${r.error}`, stats: null }
+      await previewStore.set(`${id}.slides.html`, r.html)
+      const note = r.stats?.unsupportedMedia
+        ? `有 ${r.stats.unsupportedMedia} 个音视频元素无法在网页视图播放，请用「原始版式」`
+        : ''
+      return { kind: 'pptx', note, stats: r.stats }
+    }
+
+    if (type === 'xlsx') {
+      const r = await buildSheetModel(buf)
+      if (!r.ok) return { kind: null, note: `表格视图未生成：${r.error}`, stats: null }
+      await previewStore.set(`${id}.sheet.json`, JSON.stringify(r.model))
+      const note = r.stats?.truncated
+        ? `表格较大，只显示前 ${r.stats.limits.rows} 行 / ${r.stats.limits.cols} 列`
+        : ''
+      return { kind: 'sheet', note, stats: r.stats }
+    }
+  } catch (err) {
+    return { kind: null, note: `网页视图未生成：${String(err?.message ?? err)}`, stats: null }
+  }
+
+  return { kind: null, note: '', stats: null }
 }
 
 /**
@@ -523,7 +603,7 @@ async function main() {
         const tags = (r.tags ?? []).slice(0, 4).join(',')
         console.log(`  ${label} ✓ ${short}`)
         console.log(`          → ${r.title}`)
-        console.log(`            分类 ${(r.categories ?? []).join('/')} | 标签 ${tags || '无'} | 正文 ${r.textChars} 字 | 预览 ${r.previewKind}${r.needsReview ? ' | ⚠待复查' : ''}`)
+        console.log(`            分类 ${(r.categories ?? []).join('/')} | 标签 ${tags || '无'} | 正文 ${r.textChars} 字 | 预览 ${r.previewKind}${r.webView ? ` + 网页视图(${r.webView})` : ''}${r.needsReview ? ' | ⚠待复查' : ''}`)
       } else if (r.status === 'unchanged') {
         tally.unchanged++
         console.log(`  ${label} = ${short}（内容未变，跳过）`)

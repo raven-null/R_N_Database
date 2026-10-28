@@ -1,11 +1,21 @@
 /**
  * 阅读页逻辑：文档优先 —— 打开即整屏是文档，元信息按需展开。
  *
- * 预览策略（与入库时的预处理对应）：
- *   - PDF 原件 → 浏览器原生 PDF 渲染器（最好的阅读器，翻页/缩放/搜索都有）
- *   - LibreOffice 转出的 PDF → 同上
- *   - HTML 降级件（docx/xlsx/pptx 未装 LibreOffice 时）→ iframe
- *   - 纯文本 → 后端包成 HTML 后 iframe
+ * ## 预览有哪几档
+ *
+ * 同一份文档可能有多条"看得见"的路子，页面顶部给一个切换：
+ *
+ *   Markdown     文本（渲染）  /  源码（等宽 + 行号）
+ *   Word        网页版         /  原始版式（Office 转出的 PDF）
+ *   Excel       表格（原生表）  /  原始版式
+ *   PowerPoint  原始版式（默认）/  网页版（实验）
+ *
+ * 「网页版」是入库时在本地生成好的产物（`scripts/lib/preview-web.mjs`），
+ * 线上不跑任何渲染器。它比 PDF 好在：手机能看、能复制文字、能搜索。
+ * 但纯网页渲染对复杂版式一定有偏差，所以 PDF 那一档始终保留。
+ *
+ * PowerPoint 反过来以 PDF 为默认：幻灯片就是绝对坐标摆版式，
+ * 开源渲染在字体度量与换行上必然有出入，保真优先。
  *
  * iframe 无法自定义请求头，所以预览与下载链接都带 ?token=。
  *
@@ -16,6 +26,7 @@ import { fetchDoc, fetchTaxonomy, authedUrl } from './api.js'
 import { esc, fmtSize, fmtDate, typeInfo, param, isEditableType } from './util.js'
 import { mountEditor, canEditNow } from './edit.js'
 import { mountCodeEditor } from './code-editor.js'
+import { mountSheet } from './sheet-view.js'
 
 const el = {
   title: document.getElementById('doc-title'),
@@ -36,19 +47,44 @@ let current = null
 /** 分类词表缓存（编辑元数据时要用；只拉一次）。 */
 let taxonomyCache = null
 
-/**
- * Markdown 的双视图模式。
- * 默认「渲染」—— 打开就能读；「源码」是代码格式（等宽 + 行号）。
- */
-let mdMode = 'render'
+/** 当前视图 id（render / source / web / sheet / orig）。 */
+let activeView = 'orig'
 
 /**
- * 该文档是否支持双视图。
+ * 该文档有哪些视图可选。
+ *
+ * 顺序即优先级：**第一个是默认视图**。
+ *   - Markdown：先给渲染视图（打开就能读）
+ *   - Word：先给网页版（手机友好、可复制）
+ *   - Excel：先给表格（这本该就是表）
+ *   - PowerPoint：先给原始版式（保真优先），网页版标为实验
+ *
  * @param {object} doc - 元数据
- * @returns {boolean} 是否支持
+ * @returns {Array<{id:string, label:string, hint?:string}>} 视图列表
  */
-function isDualView(doc) {
-  return doc?.previewKind === 'markdown'
+function viewsOf(doc) {
+  if (!doc) return []
+
+  if (doc.previewKind === 'markdown') {
+    return [{ id: 'render', label: '文本' }, { id: 'source', label: '源码' }]
+  }
+
+  // 「原始版式」这一档的真实含义取决于入库时能不能转 PDF
+  const origLabel = doc.previewKind === 'pdf' ? '原始版式' : '基础预览'
+
+  if (doc.webView === 'docx') {
+    return [{ id: 'web', label: '网页版' }, { id: 'orig', label: origLabel }]
+  }
+  if (doc.webView === 'pptx') {
+    return [
+      { id: 'orig', label: origLabel },
+      { id: 'web', label: '网页版', hint: '实验' },
+    ]
+  }
+  if (doc.webView === 'sheet') {
+    return [{ id: 'sheet', label: '表格' }, { id: 'orig', label: origLabel }]
+  }
+  return []
 }
 
 /**
@@ -102,13 +138,13 @@ function renderHeader(doc) {
  * @param {boolean} canEdit - 是否有编辑权限
  */
 function renderActions(doc, canEdit) {
-  const dual = isDualView(doc)
+  const views = viewsOf(doc)
 
   el.actions.innerHTML = `
-    ${dual ? `
+    ${views.length > 1 ? `
       <div class="mode-switch" role="group" aria-label="查看方式">
-        <button data-mode="render" class="${mdMode === 'render' ? 'on' : ''}">文本</button>
-        <button data-mode="source" class="${mdMode === 'source' ? 'on' : ''}">源码</button>
+        ${views.map((v) => `<button data-view="${v.id}" class="${v.id === activeView ? 'on' : ''}"
+          title="${esc(v.hint ? `${v.label}（${v.hint}）` : v.label)}">${esc(v.label)}${v.hint ? '<sup>*</sup>' : ''}</button>`).join('')}
       </div>` : ''}
     <a class="btn primary" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file`))}" download>下载</a>
     <button class="btn ghost" id="btn-info" aria-expanded="false">详情</button>
@@ -123,19 +159,50 @@ function renderActions(doc, canEdit) {
   const infoBtn = document.getElementById('btn-info')
   infoBtn.addEventListener('click', () => togglePanel())
 
-  if (dual) {
+  if (views.length > 1) {
     el.actions.querySelectorAll('.mode-switch button').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (btn.dataset.mode === mdMode) return
-        mdMode = btn.dataset.mode
+        const next = btn.dataset.view
+        if (next === activeView) return
+        activeView = next
+        rememberView(doc, next)
         el.actions.querySelectorAll('.mode-switch button').forEach((b) => {
-          b.classList.toggle('on', b.dataset.mode === mdMode)
+          b.classList.toggle('on', b.dataset.view === activeView)
         })
-        // 只换 iframe 的 src，不重建整个预览区 —— 切换更快也不闪
-        const frame = el.frame.querySelector('iframe')
-        if (frame) frame.src = previewSrc(current, mdMode)
+        renderPreview(current)
       })
     })
+  }
+}
+
+/**
+ * 记住用户对这类文档的视图偏好。
+ *
+ * 按 `webView` 分类记（docx / pptx / sheet），而不是按文档 id ——
+ * 你要是觉得 Word 的网页版不好用，不该每打开一份都要手动切一次。
+ *
+ * @param {object} doc - 元数据
+ * @param {string} view - 视图 id
+ * @returns {void}
+ */
+function rememberView(doc, view) {
+  try {
+    localStorage.setItem(`rndb_view_${doc.webView ?? doc.type}`, view)
+  } catch {
+    /* 隐私模式下 localStorage 可能不可用，忽略 */
+  }
+}
+
+/**
+ * 读回视图偏好。
+ * @param {object} doc - 元数据
+ * @returns {string|null} 上次选的视图 id
+ */
+function recallView(doc) {
+  try {
+    return localStorage.getItem(`rndb_view_${doc.webView ?? doc.type}`)
+  } catch {
+    return null
   }
 }
 
@@ -143,7 +210,7 @@ function renderActions(doc, canEdit) {
  * 构造预览件地址。
  *
  * ★ 必须带版本号。预览件是**派生**产物（Office 转 PDF、Markdown 渲染、
- * HTML 降级），同一份原件的预览件会被重新生成 —— 而 URL 里的 id 是
+ * 网页视图），同一份原件的预览件会被重新生成 —— 而 URL 里的 id 是
  * **原件**的内容哈希，预览件换了它不会变。
  * 早期版本因此踩坑：预览地址标了 immutable 却不带版本号，
  * 浏览器把旧的 HTML 降级版本缓存一年，重新生成 PDF 后用户永远看不到
@@ -152,12 +219,16 @@ function renderActions(doc, canEdit) {
  * 版本号取 updatedAt；重建预览件与人工编辑元数据都会更新它。
  *
  * @param {object} doc - 元数据
- * @param {string} [mode] - markdown 视图模式
+ * @param {string} [view] - 视图 id
  * @returns {string} 带令牌与版本号的地址
  */
-function previewSrc(doc, mode) {
+function previewSrc(doc, view = activeView) {
   const params = new URLSearchParams()
-  if (isDualView(doc)) params.set('mode', mode ?? mdMode)
+  if (doc.previewKind === 'markdown') {
+    params.set('mode', view === 'source' ? 'source' : 'render')
+  } else if (view === 'web') {
+    params.set('view', 'web')
+  }
   if (doc.updatedAt) {
     const stamp = Date.parse(doc.updatedAt)
     params.set('v', String(Number.isFinite(stamp) ? stamp : doc.updatedAt))
@@ -188,6 +259,12 @@ function closeEditor() {
 
 /**
  * 渲染预览区。
+ *
+ * 按 activeView 分派：
+ *   表格视图  → 直接在 #frame 里画表格（不是 iframe，表格要能横竖滚动）
+ *   网页视图  → iframe 载入入库时生成好的 HTML（Word / PowerPoint）
+ *   原始版式  → iframe 载入 PDF 或降级 HTML
+ *
  * @param {object} doc - 元数据
  */
 function renderPreview(doc) {
@@ -196,6 +273,13 @@ function renderPreview(doc) {
 
   if (doc.extractError) {
     el.notice.innerHTML = `<div class="notice warn">正文抽取有问题：${esc(doc.extractError)}</div>`
+  }
+
+  // ---- 表格视图：原生渲染，不走 iframe ----
+  if (activeView === 'sheet' && doc.webView === 'sheet') {
+    mountSheet(el.frame, { doc })
+    el.notice.innerHTML += '<div class="notice">表格视图（可直接滚动、选中复制；想看原样请切「原始版式」）</div>'
+    return
   }
 
   if (!doc.previewKind || doc.previewKind === 'none') {
@@ -207,26 +291,35 @@ function renderPreview(doc) {
     return
   }
 
-  const src = previewSrc(doc, mdMode)
+  const src = previewSrc(doc, activeView)
+  const isWebView = activeView === 'web'
 
-  if (doc.previewKind === 'pdf') {
+  // 「原始版式」这一档：入库时能转 PDF 就用 PDF 渲染器
+  const usePdfRenderer = !isWebView && doc.previewKind === 'pdf'
+
+  if (usePdfRenderer) {
     el.frame.innerHTML = `<iframe class="pdf" src="${esc(src)}" title="文档预览"></iframe>`
     const hints = []
     if (doc.previewNote) hints.push(esc(doc.previewNote))
+    if (doc.webView) hints.push('另一档是网页视图，手机上看更舒服')
     if (q) hints.push(`按 Ctrl+F 可搜索「${esc(q)}」`)
     if (hints.length) el.notice.innerHTML += `<div class="notice">${hints.join('　·　')}</div>`
     return
   }
 
-  // Markdown / HTML / 文本预览
+  // 网页视图 / Markdown / HTML / 代码 / 文本预览：都是 HTML 文档
   el.frame.innerHTML = `<iframe class="html" src="${esc(src)}" title="文档预览" sandbox="allow-same-origin"></iframe>`
 
   const hints = []
+  if (isWebView) {
+    hints.push(doc.webView === 'pptx' ? '网页版（实验）：字体度量与换行可能与 PowerPoint 略有差异' : '网页版：可复制文字、手机上自适应')
+    if (doc.webViewNote) hints.push(esc(doc.webViewNote))
+  }
   if (doc.previewKind === 'markdown') {
-    hints.push(mdMode === 'source' ? '源码视图（等宽 + 行号）' : '渲染视图')
+    hints.push(activeView === 'source' ? '源码视图（等宽 + 行号）' : '渲染视图')
   }
   if (doc.previewKind === 'code') hints.push('代码预览（等宽 + 行号）')
-  if (doc.previewNote) hints.push(esc(doc.previewNote))
+  if (doc.previewNote && !isWebView) hints.push(esc(doc.previewNote))
   if (/HTML 降级/.test(doc.previewNote ?? '')) hints.push('安装 LibreOffice 可转为保真度更高的 PDF 预览')
   if (hints.length) el.notice.innerHTML = `<div class="notice">${hints.join('　·　')}</div>`
 }
@@ -282,7 +375,7 @@ function openContentEditor(canEdit) {
       }
       // 预览按新版本号重取
       const frame = el.frame.querySelector('iframe')
-      if (frame) frame.src = previewSrc(current, mdMode)
+      if (frame) frame.src = previewSrc(current, activeView)
       else renderPreview(current)
       rewirePanelButtons(true)
     },
@@ -321,6 +414,13 @@ async function main() {
   try {
     const [doc, editable] = await Promise.all([fetchDoc(id), canEditNow()])
     current = doc
+
+    // 选默认视图：用户上次对这类文档的选择优先，否则用 viewsOf 里的第一个。
+    // 偏好只在这份文档真的支持该视图时才采用（比如上次选的是网页版，
+    // 但这份 docx 渲染失败没有网页视图，就要退回原始版式）
+    const views = viewsOf(doc)
+    const remembered = recallView(doc)
+    activeView = views.some((v) => v.id === remembered) ? remembered : (views[0]?.id ?? 'orig')
 
     renderHeader(doc)
     renderActions(doc, editable)

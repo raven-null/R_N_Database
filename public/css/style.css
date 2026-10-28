@@ -615,6 +615,107 @@ iframe {
 
 .frame > .empty { padding: 40px 20px; }
 
+/* ============================================================
+   Excel 表格视图（不转 PDF 的那条路）
+   ============================================================ */
+
+.sheet-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.sheet-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.sheet-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.sheet-tab {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.sheet-tab:hover { border-color: var(--accent); color: var(--text); }
+.sheet-tab.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.sheet-info { margin-left: auto; }
+
+.sheet-truncated {
+  margin: 8px 10px 0;
+  font-size: 12.5px;
+}
+
+/* 表格画布：自己横竖滚动，表头与冻结列靠 sticky 钉住 */
+.sheet-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel);
+}
+
+.sheet-table-view {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font: 13px/1.45 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: var(--text);
+}
+.sheet-table-view td {
+  padding: 2px 7px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.sheet-table-view td.num { text-align: right; }
+.sheet-table-view td.al-center { text-align: center; }
+.sheet-table-view td.al-right { text-align: right; }
+.sheet-table-view td.al-left { text-align: left; }
+.sheet-table-view td.b { font-weight: 700; }
+.sheet-table-view td.i { font-style: italic; }
+.sheet-table-view td.u { text-decoration: underline; }
+.sheet-table-view td.s { text-decoration: line-through; }
+
+/* 冻结：表头贴顶、冻结列贴左。层级要压过普通格子 */
+.sheet-table-view thead td {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--panel-2);
+  font-weight: 600;
+}
+.sheet-table-view td.frozen-x {
+  position: sticky;
+  z-index: 2;
+  background: var(--panel-2);
+  box-shadow: 1px 0 0 var(--line);
+}
+.sheet-table-view thead td.frozen-x { z-index: 4; }
+
+.sheet-more { margin: 10px; }
+.sheet-loading { padding: 30px 24px; color: var(--muted); font-size: 13.5px; }
+
+@media (max-width: 720px) {
+  .sheet-table-view { font-size: 12px; }
+  .sheet-table-view td { padding: 2px 5px; }
+}
+
 @media (max-width: 720px) {
   /* 窄屏：两个盒子改为上下堆叠，仍各自独立滚动。
      侧栏限高，把大部分高度留给文档列表。 */
