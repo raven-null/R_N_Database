@@ -7,9 +7,11 @@
  * @module netlify/functions/_lib/routes/docs
  */
 
+import { createHash } from 'node:crypto'
+
 import { checkAuth } from '../auth.mjs'
 import {
-  ok, badRequest, notFound, unauthorized, forbidden, serverError, content,
+  ok, fail, badRequest, notFound, unauthorized, forbidden, serverError, content,
 } from '../respond.mjs'
 import {
   readAllMeta, readMeta, readDocFile, readPreview, readDocText, readTaxonomy, tally,
@@ -18,6 +20,10 @@ import { applyDocChange } from '../index-store.mjs'
 import { getDocsStore, STORES } from '../store.mjs'
 import { looksLikePinyin, matchesPinyin } from '../pinyin-match.mjs'
 import { renderSourcePage } from '../source-view.mjs'
+import { renderCodePage } from '../code-view.mjs'
+import { renderMarkdownPage } from '../markdown-view.mjs'
+import { isEditableType } from '../file-types.mjs'
+import { plainTextOf, countLines } from '../plain-text.mjs'
 
 /**
  * HTML 预览件的 CSP。
@@ -53,7 +59,7 @@ const MAX_LIMIT = 200
 export async function docsRoute(req, url, seg) {
   // 读只要 guest（未登录访客即可，但只会看到标记为 public 的文档）；
   // 写必须是 admin —— read 令牌是给工作站和博客的，不该能改资料
-  const isWrite = req.method === 'PATCH' || req.method === 'DELETE' || req.method === 'POST'
+  const isWrite = ['PATCH', 'DELETE', 'POST', 'PUT'].includes(req.method)
   const auth = await checkAuth(req, url, isWrite ? 'admin' : 'guest')
 
   if (!auth.ok) {
@@ -78,6 +84,13 @@ export async function docsRoute(req, url, seg) {
       if (req.method === 'DELETE') return removeDoc(req, id, auth)
       if (req.method !== 'GET') return badRequest(`${req.method} 不支持`, { req })
       return detail(req, id, auth)
+    }
+
+    // /api/v1/docs/{id}/content —— 直接改写原件内容（代码/文本编辑）。
+    // 必须放在下面那条「非 GET 一律拒绝」之前。
+    if (action === 'content') {
+      if (req.method !== 'PUT') return badRequest('编辑内容请用 PUT', { req })
+      return updateContent(req, id, auth)
     }
 
     if (req.method !== 'GET') return badRequest(`${req.method} 不支持`, { req })
@@ -105,6 +118,15 @@ const EDITABLE = ['title', 'categories', 'tags', 'summary', 'visibility', 'autho
 /** 标签长度与数量上限（与批量接口保持一致）。 */
 const MAX_TAG_LEN = 20
 const MAX_TAGS_PER_DOC = 12
+
+/**
+ * 单次内容编辑的字符上限（100 万）。
+ *
+ * 不是为了限制「能存多大的文件」，而是限制**一次函数调用**要处理多少：
+ * 编辑要重算词频、重写预览件、并写回受影响的分片。代码/配置/Markdown
+ * 极少超过这个量级；真更大的文件走上传路径（在本地入库，不受函数时限约束）。
+ */
+const MAX_CONTENT_CHARS = 1_000_000
 
 /**
  * PATCH /api/v1/docs/{id} —— 修改元数据。
@@ -212,6 +234,173 @@ async function updateDoc(req, id, auth) {
 }
 
 /**
+ * PUT /api/v1/docs/{id}/content —— 直接改写原件内容（代码 / 文本 / Markdown）。
+ *
+ * ## 两个不能做错的地方
+ *
+ * 1. **id 不能变。** id 是入库时按原件内容算的 SHA-256 前 12 位
+ *    （内容寻址）。改了内容，id 与内容就对不上了，但这里**坚决不改 id**：
+ *    id 是 URL、标签、外部链接（工作站/博客）的引用锚点，
+ *    换 id 等于让所有引用失效。代价是 `/file` 不能再标 immutable
+ *    （见 originalFile 里的说明）。
+ *
+ * 2. **旧正文必须在覆盖前读出来。** 索引是增量维护的：删旧词条要按**旧正文**
+ *    算，加新词条按**新正文**算。若先写文件再读正文，读到的就是新内容，
+ *    旧内容独有的词会永久留在索引里 —— 搜得到、打开却看不到。
+ *
+ * ## 为什么只能改纯文本类
+ *
+ * docx/xlsx/pptx/pdf 是二进制容器，网页里的 textarea 改不了结构。
+ * 那些类型走「重新上传」，不走这条接口。
+ *
+ * @param {Request} req - 请求
+ * @param {string} id - 文档 id
+ * @param {object} auth - 鉴权结果
+ * @returns {Promise<Response>} 响应
+ */
+async function updateContent(req, id, auth) {
+  const oldMeta = await readMeta(id)
+  if (!oldMeta) return notFound('文档不存在', { req })
+
+  if (!isEditableType(oldMeta.type)) {
+    return badRequest(
+      `该文档类型（${oldMeta.type}）不能在网页上编辑内容。`
+      + '当前只支持代码、Markdown 与纯文本；Office/PDF 请改用重新上传。',
+      { req },
+    )
+  }
+
+  let body
+  try {
+    body = await req.json()
+  } catch {
+    return badRequest('请求体不是合法 JSON（应为 { "content": "..." }）', { req })
+  }
+
+  if (typeof body?.content !== 'string') {
+    return badRequest('缺少 content 字段（应为字符串）', { req })
+  }
+
+  const text = body.content
+  // 用 length（UTF-16 码元）而不是 [...text].length：后者会为上限检查
+  // 分配一个百万级数组，纯属浪费
+  if (text.length > MAX_CONTENT_CHARS) {
+    return badRequest(
+      `内容过长（上限 ${MAX_CONTENT_CHARS} 字符，当前 ${text.length} 字符）。`
+      + '更大的文件请从「上传」入口重新入库。',
+      { req },
+    )
+  }
+
+  // 乐观并发：前端若带了它加载时的 updatedAt，说明是基于哪个版本改的。
+  // 两个标签页同时编辑时，后提交的那个不应该静默盖掉前一个。
+  if (body.baseUpdatedAt && body.baseUpdatedAt !== oldMeta.updatedAt) {
+    return fail('CONFLICT', '这份文档在你编辑期间已被改动过，请刷新后重新编辑（你的修改还在编辑器里，可以先复制出来）', {
+      status: 409,
+      req,
+    })
+  }
+
+  const buf = Buffer.from(text, 'utf8')
+  const sha256 = createHash('sha256').update(buf).digest('hex')
+
+  // 内容没变就什么都不做（避免无谓地重渲染预览件与重写索引分片）
+  if (sha256 === oldMeta.sha256) {
+    return ok({
+      doc: oldMeta,
+      unchanged: true,
+      note: '内容与原件一致，未做改动。',
+    }, { req })
+  }
+
+  // ★ 必须在覆盖前读旧正文（见函数注释第 2 点）
+  const oldText = await readDocText(id).catch(() => null)
+  const oldBody = (oldText?.pages ?? []).join('\n')
+
+  const newBody = plainTextOf(text, oldMeta.type)
+  const now = new Date().toISOString()
+
+  // ---- 1. 原件 ----
+  const filesStore = await getDocsStore(STORES.FILES)
+  await filesStore.set(`${id}.${oldMeta.ext}`, buf)
+
+  // ---- 2. 正文（检索 / AI / /text 都用它）----
+  const textStore = await getDocsStore(STORES.TEXT)
+  if (newBody) {
+    await textStore.set(id, JSON.stringify({ pages: [newBody] }))
+  } else {
+    await textStore.delete(id).catch(() => {})
+  }
+
+  // ---- 3. 预览件 ----
+  let previewKind = oldMeta.previewKind
+  let previewNote = ''
+
+  const previewStore = await getDocsStore(STORES.PREVIEWS)
+
+  if (oldMeta.type === 'code') {
+    const rendered = renderCodePage(text, { title: oldMeta.title, ext: oldMeta.ext })
+    await previewStore.set(`${id}.html`, rendered.html)
+    previewKind = 'code'
+    previewNote = rendered.highlighted ? '' : '未识别语言或文件过大，按纯文本显示'
+  } else if (oldMeta.type === 'md') {
+    const rendered = renderMarkdownPage(text, oldMeta.title)
+    await previewStore.set(`${id}.html`, rendered.html)
+    previewKind = 'markdown'
+    previewNote = rendered.ok ? '' : `渲染失败，已回退为纯文本：${rendered.error}`
+  } else {
+    // txt：没有独立的渲染件，预览走函数里的 `<pre>` 兜底；
+    // 万一是早期版本留下的 html 预览件，要删掉，否则会一直显示旧内容
+    await previewStore.delete(`${id}.html`).catch(() => {})
+    previewKind = 'text'
+    previewNote = ''
+  }
+
+  // ---- 4. 元数据 ----
+  const newMeta = {
+    ...oldMeta,
+    sha256,
+    size: buf.length,
+    hasText: Boolean(newBody),
+    textChars: newBody.length,
+    lines: countLines(text),
+    extractError: undefined,
+    previewKind,
+    previewNote,
+    updatedAt: now,
+    contentEditedAt: now,
+    // 内容变了，旧的「待复查」结论不再可信 —— 但不替用户自动下判断，
+    // 只把标记留着，等他自己决定是否重新分类
+    editedAt: oldMeta.editedAt ?? now,
+  }
+
+  const metaStore = await getDocsStore(STORES.META)
+  await metaStore.set(id, JSON.stringify(newMeta))
+
+  // ---- 5. 索引增量更新（要用新旧两版正文）----
+  let indexResult = null
+  let indexError = null
+  try {
+    indexResult = await applyDocChange({ oldMeta, newMeta, oldBody, newBody })
+  } catch (err) {
+    indexError = String(err?.message ?? err)
+  }
+
+  return ok({
+    doc: newMeta,
+    sha256,
+    size: buf.length,
+    lines: newMeta.lines,
+    previewKind,
+    index: indexResult,
+    indexError,
+    note: indexError
+      ? '内容已保存，但索引更新失败 —— 检索结果可能暂时不准，可在本地运行 node scripts/reindex.mjs 修复。'
+      : '内容、正文、预览件与索引均已更新。',
+  }, { req })
+}
+
+/**
  * DELETE /api/v1/docs/{id} —— 删除文档（原件、预览件、正文、元数据、索引）。
  *
  * @param {Request} req - 请求
@@ -227,6 +416,14 @@ async function removeDoc(req, id, auth) {
   const previewStore = await getDocsStore(STORES.PREVIEWS)
   const textStore = await getDocsStore(STORES.TEXT)
   const metaStore = await getDocsStore(STORES.META)
+
+  // ★ 正文必须在删之前读出来。
+  // 索引是增量维护的：要摘掉这份文档的词条，得知道它的**旧正文**。
+  // 早期版本先删 blob 再更新索引，于是算出来的旧词频只剩元数据部分，
+  // 正文独有的词永远留在分片里 —— 越删库越脏，而搜索时又因为
+  // 文档已不在 docs 列表里而被过滤掉，表面上"看起来没问题"。
+  const oldText = await readDocText(id).catch(() => null)
+  const oldBody = (oldText?.pages ?? []).join('\n')
 
   // 原件 key 带扩展名，按前缀找更稳妥
   const listed = await filesStore.list({ prefix: `${id}.` }).catch(() => ({ blobs: [] }))
@@ -245,7 +442,7 @@ async function removeDoc(req, id, auth) {
   let indexResult = null
   let indexError = null
   try {
-    indexResult = await applyDocChange({ oldMeta: meta, newMeta: null })
+    indexResult = await applyDocChange({ oldMeta: meta, newMeta: null, oldBody, newBody: '' })
   } catch (err) {
     indexError = String(err?.message ?? err)
   }
@@ -406,14 +603,20 @@ async function originalFile(req, url, id, auth) {
 
   const inline = url.searchParams.get('inline') === '1'
 
+  // ★ 不能标 immutable。id 是**入库时**的内容哈希，而内容现在可以在网页上
+  // 直接编辑 —— 编辑之后 id 不变、内容变了，immutable 会让浏览器抱着旧文件
+  // 一整年。（早期版本这里确实标了 immutable，编辑功能上线后必须改掉。）
+  // 与预览件同一套规则：URL 带 ?v= 才允许长缓存。
+  const VERSIONED_CACHE = url.searchParams.has('v')
+    ? 'private, max-age=31536000, immutable'
+    : 'private, no-cache'
+
   return content(body, {
     req,
     contentType: meta.mime || 'application/octet-stream',
     filename: meta.originalName || `${meta.title}.${meta.ext}`,
     inline,
-    // 内容寻址（文件名即内容哈希）→ 可以放心让浏览器长期缓存。
-    // 但原件是私有的，只允许私有缓存，不给 CDN。
-    cacheControl: 'private, max-age=31536000, immutable',
+    cacheControl: VERSIONED_CACHE,
   })
 }
 
@@ -509,6 +712,21 @@ async function preview(req, url, id, auth) {
       })
     }
     return notFound('渲染件缺失，请重新入库该文档', { req })
+  }
+
+  // 代码预览件：带行号 + 语法高亮的完整 HTML 页（入库或编辑时生成并缓存）
+  if (meta.previewKind === 'code') {
+    const p = await readPreview(id, 'html')
+    if (p) {
+      return content(p.body, {
+        req,
+        contentType: p.contentType,
+        inline: true,
+        headers: { 'Content-Security-Policy': HTML_PREVIEW_CSP },
+        cacheControl: VERSIONED_CACHE,
+      })
+    }
+    return notFound('代码预览件缺失，请重新入库该文档', { req })
   }
 
   // HTML 降级预览件

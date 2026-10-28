@@ -33,6 +33,7 @@ import { detectType, extractFile, canExtractText, titleFromFilename, pickTitle, 
 import { classify, loadTaxonomy, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
+import { renderCodePage } from '../netlify/functions/_lib/code-view.mjs'
 import { convertToPdfDetailed, findLibreOffice as findSoffice, officeEngineStatus } from './lib/office.mjs'
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
@@ -292,6 +293,16 @@ export async function ingestOne(filePath, ctx, override = {}) {
       previewKind = 'html'
       previewNote = 'HTML 降级（无可用转换器，版式会丢失）'
     }
+  } else if (type === 'code') {
+    // 代码：带行号 + 语法高亮的只读预览。
+    // 与 md 同理用**原件字节**渲染 —— 抽取只统一换行，
+    // 但缩进与行尾空白必须原样保留，否则代码就失真了。
+    const { html } = renderCodePage(buf.toString('utf8'), {
+      title: finalTitle,
+      ext: extname(abs),
+    })
+    await previewStore.set(`${id}.html`, html)
+    previewKind = 'code'
   } else if (type === 'md') {
     // Markdown 双视图：渲染件在入库时生成并缓存；
     // 源码视图（代码格式）由函数按需即时生成，不占存储。

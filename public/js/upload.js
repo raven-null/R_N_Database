@@ -56,10 +56,26 @@ export function mountUpload(opts) {
   const { button, dropZone, banner, onChange } = opts
 
   // 隐藏的文件选择器
+  //
+  // accept 只影响文件对话框的默认过滤，**真正的白名单在服务端**
+  // （_lib/file-types.mjs 的 EXT_ALIASES）。这里不追求列全 60 多种后缀，
+  // 但代码类必须带上 —— 否则在文件对话框里根本选不中 .ts/.py 这类文件，
+  // 用户会以为"不支持代码"。
   const picker = document.createElement('input')
   picker.type = 'file'
   picker.multiple = true
-  picker.accept = '.pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.md,.markdown,.txt,.csv'
+  picker.accept = [
+    // 文档
+    '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt', '.md', '.markdown', '.txt', '.csv',
+    // 代码与配置
+    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
+    '.py', '.java', '.kt', '.go', '.rs', '.c', '.h', '.cpp', '.hpp', '.cs', '.rb', '.php',
+    '.swift', '.dart', '.lua', '.r', '.scala', '.groovy',
+    '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd',
+    '.sql', '.html', '.css', '.scss', '.less',
+    '.json', '.yaml', '.yml', '.toml', '.ini', '.xml', '.conf',
+    '.proto', '.graphql', '.tex', '.diff', '.patch',
+  ].join(',')
   picker.style.display = 'none'
   document.body.appendChild(picker)
 
@@ -202,7 +218,7 @@ export async function renderPending(container, opts = {}) {
     <div class="pending-list">
       ${data.items.map((it) => `
         <div class="pending-item" data-id="${esc(it.id)}">
-          ${typeBadge(it.type)}
+          ${typeBadge(it.type, it.ext)}
           <div class="pending-main">
             <div class="pending-title">${esc(it.title)}</div>
             <div class="pending-meta">${fmtSize(it.size)}<i>·</i>${fmtDate(it.uploadedAt)}</div>

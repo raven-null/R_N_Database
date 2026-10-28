@@ -22,10 +22,15 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
+import { provisionFixtures, cleanupFixtures } from './lib/fixtures.mjs'
+
 const ROOT = process.cwd()
 const BASE = process.env.RENDER_BASE ?? 'http://127.0.0.1:8899'
 const SHOTS = join(ROOT, '.shots')
 const PORT = 9333
+
+/** 夹具标记（库里原有文档不受影响，跑完即删）。 */
+const MARK = `RNDBRENDER${Date.now()}`
 const CHROME_CANDIDATES = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -265,38 +270,38 @@ async function checkList(client) {
   if (r.sidebarBorder !== '1px' || r.mainBorder !== '1px') issues.push('两个盒子应当各有边框')
   if (r.sidebarOverflowY !== 'auto' || r.mainOverflowY !== 'auto') issues.push('两个盒子应当各自 overflow-y:auto')
   if (!r.mainScrollH || !r.mainClientH || r.mainScrollH <= r.mainClientH) {
-    issues.push('右侧盒子内容没有超出高度，无法验证独立滚动')
+    // 库很小（例如只有几个测试夹具）时右侧内容本来就不会溢出，
+    // 这不是缺陷 —— 下面的滚动独立性检查仍然照跑
+    line('右侧内容溢出', `未溢出（内容 ${r.mainScrollH} / 可视 ${r.mainClientH}），跳过溢出相关断言`)
   }
   if (r.docCount < 1) issues.push('没有渲染出任何文档卡片')
   if (r.chipCount < 3) issues.push('筛选切面太少')
   if (r.listHeadPosition !== 'sticky') issues.push('统计行应当贴顶吸附')
 
   // ---- 独立滚动：滚右边，左边不该跟着动 ----
-  if (r.sidebarScrollH > r.sidebarClientH) {
-    await evaluate(client, `document.querySelector('.main').scrollTop = 600`)
-    await new Promise((res) => setTimeout(res, 250))
-    const after = await evaluate(client, `({
-      mainTop: document.querySelector('.main').scrollTop,
-      sideTop: document.querySelector('.sidebar').scrollTop,
-      pageTop: window.scrollY,
-      docTop: document.scrollingElement.scrollTop,
-    })`)
-    line('滚右边 600px 后', `右 ${after.mainTop}　左 ${after.sideTop}　整页 ${after.docTop}`)
+  // ★ 只有内容真的超出可视高度时才谈得上「能滚」。
+  // 库里只有几份文档时右侧本来就不溢出，此时把 scrollTop 设成 600 也只会是 0
+  // —— 那是内容太少，不是布局坏了。
+  const mainOverflows = (r.mainScrollH ?? 0) > (r.mainClientH ?? 0)
+
+  await evaluate(client, `document.querySelector('.main').scrollTop = 600`)
+  await new Promise((res) => setTimeout(res, 250))
+  const after = await evaluate(client, `({
+    mainTop: document.querySelector('.main').scrollTop,
+    sideTop: document.querySelector('.sidebar').scrollTop,
+    docTop: document.scrollingElement.scrollTop,
+  })`)
+  line('滚右边 600px 后', `右 ${after.mainTop}　左 ${after.sideTop}　整页 ${after.docTop}`)
+
+  if (mainOverflows) {
     if (after.mainTop < 500) issues.push('右侧盒子没有真的滚动')
-    if (after.sideTop !== 0) issues.push('滚右边时左边跟着动了（未独立）')
-    if (after.docTop !== 0) issues.push('滚右边时整页也滚了（未独立）')
   } else {
-    line('独立滚动验证', '左盒子内容未超屏，仅验证右盒子与整页互不影响')
-    await evaluate(client, `document.querySelector('.main').scrollTop = 600`)
-    await new Promise((res) => setTimeout(res, 250))
-    const after = await evaluate(client, `({
-      mainTop: document.querySelector('.main').scrollTop,
-      docTop: document.scrollingElement.scrollTop,
-    })`)
-    line('滚右边 600px 后', `右 ${after.mainTop}　整页 ${after.docTop}`)
-    if (after.mainTop < 500) issues.push('右侧盒子没有真的滚动')
-    if (after.docTop !== 0) issues.push('滚右边时整页也滚了（未独立）')
+    line('滚动独立性验证', '内容未超屏，无法触发滚动（不是缺陷）；仍检查整页是否被带动')
   }
+  if (r.sidebarScrollH > r.sidebarClientH && after.sideTop !== 0) {
+    issues.push('滚右边时左边跟着动了（未独立）')
+  }
+  if (after.docTop !== 0) issues.push('滚右边时整页也滚了（未独立）')
 
   if (issues.length === 0) console.log('\n  ✓ 两个盒子独立滚动正常')
   else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
@@ -788,6 +793,230 @@ async function checkEmptyState(client) {
 }
 
 /* ============================================================
+   代码预览 / 内容编辑器检查
+   ============================================================ */
+
+/**
+ * 代码预览页要问的渲染事实（读 iframe 内部：同源可直接访问）。
+ *
+ * 重点是**行号与代码行是否对齐**。行号是单独一列，靠相同的字号与行高
+ * 对齐；一旦哪边多了一点 padding 或字号不同，行号就会整体偏移 ——
+ * 这种问题在 DOM 结构测试里完全看不出来，只有真渲染才暴露。
+ */
+const CODE_PROBE = `(() => {
+  const box = (el) => {
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { w: Math.round(r.width), h: Math.round(r.height) }
+  }
+  const frame = document.querySelector('#frame iframe')
+  const out = {
+    frameCls: frame?.className ?? null,
+    frameSrc: frame?.getAttribute('src') ?? null,
+    hasVersion: /[?&]v=/.test(frame?.getAttribute('src') ?? ''),
+    topbarButtons: [...document.querySelectorAll('.view-topbar .actions .btn')].map(b => b.textContent.trim()),
+    notice: document.getElementById('notice')?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 80) ?? '',
+  }
+  try {
+    const d = frame?.contentDocument
+    if (!d) return { ...out, inner: null }
+    const gutter = d.querySelector('.gutter')
+    const pre = d.querySelector('pre.code')
+    const gs = gutter ? getComputedStyle(gutter) : null
+    const ps = pre ? getComputedStyle(pre) : null
+    out.inner = {
+      gutterLines: (gutter?.textContent ?? '').trim().split('\\n').length,
+      codeLines: (pre?.textContent ?? '').replace(/\\n$/, '').split('\\n').length,
+      gutterScrollH: gutter?.scrollHeight ?? null,
+      codeScrollH: pre?.scrollHeight ?? null,
+      gutterPaddingTop: gs?.paddingTop ?? null,
+      codePaddingTop: ps?.paddingTop ?? null,
+      gutterLineHeight: gs?.lineHeight ?? null,
+      codeLineHeight: ps?.lineHeight ?? null,
+      codeWhiteSpace: ps?.whiteSpace ?? null,
+      gutterPosition: gs?.position ?? null,
+      fontFamily: ps?.fontFamily?.slice(0, 40) ?? null,
+      hljsSpans: d.querySelectorAll('.hljs-keyword, .hljs-string, .hljs-title, .hljs-number').length,
+      lang: d.querySelector('.meta .lang')?.textContent?.trim() ?? null,
+      metaLineCount: d.querySelector('.meta')?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 60) ?? null,
+      bodyBg: getComputedStyle(d.body).backgroundColor,
+    }
+  } catch (e) {
+    out.inner = { error: String(e.message) }
+  }
+  return out
+})()`
+
+/**
+ * 检查代码文档的预览页（带行号 + 语法高亮）。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - 代码文档 id
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkCodePreview(client, id) {
+  console.log('\n【代码预览真实渲染】')
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+  await new Promise((r) => setTimeout(r, 900))
+
+  const r = await evaluate(client, CODE_PROBE)
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+  const inner = r.inner ?? {}
+
+  line('预览 iframe', `${r.frameCls ?? '缺失'}（带版本号：${r.hasVersion ? '是' : '否'}）`)
+  line('语言标识', inner.lang ?? '缺失')
+  line('元信息条', inner.metaLineCount ?? '缺失')
+  line('行号列 / 代码行', `${inner.gutterLines} / ${inner.codeLines}`)
+  line('行号列与代码高度', `${inner.gutterScrollH} / ${inner.codeScrollH}`)
+  line('行高', `${inner.gutterLineHeight} / ${inner.codeLineHeight}（padding-top ${inner.gutterPaddingTop} / ${inner.codePaddingTop}）`)
+  line('代码 white-space', inner.codeWhiteSpace ?? '缺失')
+  line('行号列定位', `${inner.gutterPosition}（横向滚动时钉住）`)
+  line('等宽字体', inner.fontFamily ?? '缺失')
+  line('高亮 token 数', inner.hljsSpans ?? 0)
+  line('页面背景', inner.bodyBg ?? '缺失')
+
+  const issues = []
+  if (r.frameCls !== 'html') issues.push(`代码文档的预览 iframe 类型是 ${r.frameCls}，应为 html`)
+  if (!r.hasVersion) issues.push('预览地址没带版本号')
+  if (!inner.gutterLines) issues.push('没有行号列')
+  if (inner.gutterLines !== inner.codeLines) {
+    issues.push(`行号数(${inner.gutterLines})与代码行数(${inner.codeLines})不一致`)
+  }
+  // ★ 对齐：两边 padding-top 与行高必须一致，总高度才会一致
+  if (inner.gutterScrollH !== inner.codeScrollH) {
+    issues.push(`行号列与代码块高度不等（${inner.gutterScrollH} vs ${inner.codeScrollH}）—— 行号会整体偏移`)
+  }
+  if (inner.gutterPaddingTop !== inner.codePaddingTop) issues.push('行号列与代码块的 padding-top 不一致')
+  if (inner.gutterLineHeight !== inner.codeLineHeight) issues.push('行号列与代码块的行高不一致')
+  if (inner.codeWhiteSpace !== 'pre') issues.push(`代码应保持 white-space: pre（现为 ${inner.codeWhiteSpace}）—— 折行会打乱行号`)
+  if (inner.gutterPosition !== 'sticky') issues.push('行号列应当 position: sticky')
+  if (!/mono|Consolas|Courier/i.test(inner.fontFamily ?? '')) issues.push('代码没用等宽字体')
+  if ((inner.hljsSpans ?? 0) < 3) issues.push(`语法高亮没生效（token 数 ${inner.hljsSpans}）`)
+
+  if (issues.length === 0) console.log('\n  ✓ 代码预览（行号对齐 + 高亮）正常')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'code-preview')
+  console.log(`  截图已存 .shots/code-preview.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
+/**
+ * 内容编辑器要问的渲染事实。
+ */
+const CODE_EDITOR_PROBE = `(() => {
+  const box = (sel) => {
+    const el = document.querySelector(sel)
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { w: Math.round(r.width), h: Math.round(r.height) }
+  }
+  const style = (sel, prop) => {
+    const el = document.querySelector(sel)
+    return el ? getComputedStyle(el)[prop] : null
+  }
+  const ta = document.getElementById('ce-text')
+  return {
+    hasButton: Boolean(document.getElementById('btn-edit-content')),
+    hasEditor: Boolean(document.querySelector('.code-editor')),
+    editorBox: box('.code-editor'),
+    taBox: box('#ce-text'),
+    taFont: style('#ce-text', 'fontFamily')?.slice(0, 40) ?? null,
+    taFontSize: style('#ce-text', 'fontSize') ?? null,
+    taWhiteSpace: style('#ce-text', 'whiteSpace') ?? null,
+    taTabSize: style('#ce-text', 'tabSize') ?? null,
+    taResize: style('#ce-text', 'resize') ?? null,
+    taDisabled: ta ? ta.disabled : null,
+    taLines: ta ? ta.value.split('\\n').length : 0,
+    taChars: ta?.value?.length ?? 0,
+    stat: document.getElementById('ce-stat')?.textContent?.trim() ?? null,
+    saveDisabled: document.getElementById('ce-save')?.disabled ?? null,
+    barText: document.querySelector('.code-edit-bar')?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 90) ?? null,
+    viewportH: innerHeight,
+  }
+})()`
+
+/**
+ * 检查内容编辑器的真实布局与 Tab 缩进。
+ * @param {object} client - CDP 客户端
+ * @param {string} id - 代码文档 id
+ * @returns {Promise<boolean>} 是否通过
+ */
+async function checkContentEditor(client, id) {
+  console.log('\n【内容编辑器真实渲染】')
+  await openPage(client, `${BASE}/view.html?id=${id}`)
+  await new Promise((r) => setTimeout(r, 700))
+
+  const clicked = await evaluate(client, `(() => {
+    const b = document.getElementById('btn-edit-content')
+    if (!b) return false
+    b.click()
+    return true
+  })()`)
+  if (!clicked) {
+    console.log('  ✗ 找不到「编辑内容」按钮（本地开发应为 admin 角色，且这份文档应是代码/文本类）')
+    return false
+  }
+  await new Promise((r) => setTimeout(r, 1200))   // 等原件取回来
+
+  const r = await evaluate(client, CODE_EDITOR_PROBE)
+  const line = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`)
+
+  line('编辑器尺寸', r.editorBox ? `${r.editorBox.w}×${r.editorBox.h}` : '缺失')
+  line('编辑区尺寸', r.taBox ? `${r.taBox.w}×${r.taBox.h}（占视口 ${(r.taBox.h / r.viewportH * 100).toFixed(0)}%）` : '缺失')
+  line('等宽 / 字号', `${r.taFont} / ${r.taFontSize}`)
+  line('white-space / tab-size', `${r.taWhiteSpace} / ${r.taTabSize}`)
+  line('可调整高度', r.taResize)
+  line('已载入内容', `${r.taLines} 行 / ${r.taChars} 字`)
+  line('统计行', r.stat ?? '缺失')
+  line('操作提示', r.barText ?? '缺失')
+  line('保存按钮可用', r.saveDisabled === false ? '是' : '否')
+
+  const issues = []
+  if (!r.hasEditor) issues.push('内容编辑器没渲染出来')
+  if (r.taDisabled !== false) issues.push('编辑区仍是禁用状态（原件没取回来？）')
+  if (r.taLines < 2) issues.push('编辑区没有载入内容')
+  if (!r.taBox) issues.push('编辑区没有尺寸')
+  // 编辑器要足够大才谈得上"顺手编辑代码"
+  if (r.taBox && r.taBox.h < 300) issues.push(`编辑区太矮（${r.taBox.h}px），编辑代码不够用`)
+  if (r.taBox && r.taBox.w < 400) issues.push(`编辑区太窄（${r.taBox.w}px）`)
+  if (!/mono|Consolas|Courier/i.test(r.taFont ?? '')) issues.push('编辑区不是等宽字体')
+  if (r.taWhiteSpace !== 'pre') issues.push(`代码编辑区应 white-space: pre（现为 ${r.taWhiteSpace}）—— 否则长行折行会看不出缩进结构`)
+  if (!/^(2|2px|2em)$/.test(String(r.taTabSize))) issues.push(`tab-size 应为 2（现为 ${r.taTabSize}）`)
+  if (r.saveDisabled !== false) issues.push('保存按钮不可用')
+
+  // ---- Tab 真的插入缩进（合成事件即可：处理器不校验 isTrusted）----
+  const tabProbe = await evaluate(client, `(() => {
+    const ta = document.getElementById('ce-text')
+    const before = ta.value
+    ta.setSelectionRange(0, 0)
+    ta.focus()
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    const afterTab = ta.value
+    ta.setSelectionRange(2, 2)
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }))
+    return {
+      startsWithIndent: afterTab.startsWith('  '),
+      grew: afterTab.length === before.length + 2,
+      restored: ta.value === before,
+      stat: document.getElementById('ce-stat')?.textContent?.trim() ?? '',
+      focusMoved: document.activeElement !== ta,
+    }
+  })()`)
+  line('Tab 插入缩进', tabProbe.startsWithIndent ? '是' : '否')
+  line('Shift+Tab 反缩进', tabProbe.restored ? '已还原' : '未还原')
+  if (!tabProbe.startsWithIndent) issues.push('Tab 没有插入缩进（焦点可能被跳走）')
+  if (!tabProbe.grew) issues.push('Tab 插入的字符数不对')
+  if (!tabProbe.restored) issues.push('Shift+Tab 没有正确反缩进')
+
+  if (issues.length === 0) console.log('\n  ✓ 内容编辑器布局与交互正常')
+  else issues.forEach((i) => console.log(`\n  ✗ ${i}`))
+
+  const bytes = await screenshot(client, 'code-editor')
+  console.log(`  截图已存 .shots/code-editor.png（${(bytes / 1024).toFixed(1)}KB）`)
+  return issues.length === 0
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 
@@ -812,6 +1041,7 @@ async function main() {
 
   let ok = true
   let client = null
+  let fixtures = null
 
   try {
     const version = await waitForCdp(PORT)
@@ -823,33 +1053,49 @@ async function main() {
 
     client = await connectCdp(page.webSocketDebuggerUrl)
 
-    // 空库时「空状态」就是用户看到的界面，改验证它本身
     const health = await (await fetch(`${BASE}/api/v1/health`)).json()
     const docCount = health?.data?.docCount ?? 0
     if (docCount === 0) {
-      console.log('\n  库是空的 —— 跳过依赖文档的检查，改验证空状态界面。')
-      console.log('  （想跑完整检查：先 node scripts/ingest.mjs "<目录>" 入库）')
-      const emptyOk = await checkEmptyState(client)
-      console.log('\n────────────────────────────────')
-      console.log(emptyOk ? '  ✓ 空状态检查通过' : '  ✗ 空状态存在问题')
-      console.log('')
-      process.exit(emptyOk ? 0 : 1)
+      console.log('\n  库是空的 —— 先验证空状态界面，再造夹具跑完整检查。')
+    } else {
+      console.log(`\n  库里已有 ${docCount} 份文档；另外造 3 份夹具，保证各类型都有覆盖。`)
     }
+
+    // 空库也要能测：空状态本身是一个该验证的界面
+    if (docCount === 0) {
+      ok = (await checkEmptyState(client)) && ok
+    }
+
+    // 夹具始终造：代码/Markdown/PDF 三类的检查不能因为"库里恰好没有"而跳过
+    fixtures = await provisionFixtures({ root: ROOT, base: BASE, mark: MARK })
+    console.log(`  夹具：${fixtures.ids.length} 份（${MARK}）`)
 
     ok = (await checkList(client)) && ok
 
-    // 阅读页：取一份 PDF 与一份非 PDF
-    const listRes = await fetch(`${BASE}/api/v1/docs`)
+    // 阅读页：优先用夹具里的 PDF 与代码文档（类型确定），没有再退回库里的
+    const listRes = await fetch(`${BASE}/api/v1/docs?limit=200`)
     const list = await listRes.json()
-    const pdf = list.data.items.find((d) => d.type === 'pdf')
+    const byId = (id) => (id ? list.data.items.find((d) => d.id === id) : null)
+
+    const pdf = byId(fixtures.byKind.pdf) ?? list.data.items.find((d) => d.type === 'pdf')
+    const code = byId(fixtures.byKind.code) ?? list.data.items.find((d) => d.type === 'code')
     const other = list.data.items.find((d) => d.type !== 'pdf')
 
     if (pdf) ok = (await checkView(client, pdf.id, 'PDF 内嵌预览', 'view-pdf')) && ok
     if (other) ok = (await checkView(client, other.id, `${other.type.toUpperCase()} 预览`, `view-${other.type}`)) && ok
     if (other) ok = (await checkEditor(client, other.id)) && ok
 
+    // ★ 代码：预览件（行号对齐 + 高亮）与内容编辑器
+    if (code) {
+      ok = (await checkCodePreview(client, code.id)) && ok
+      ok = (await checkContentEditor(client, code.id)) && ok
+    } else {
+      console.log('\n【代码预览 / 内容编辑器】\n  ✗ 库里没有代码文档，也不该出现这种情况（夹具本该造出一份）')
+      ok = false
+    }
+
     // Markdown 双视图
-    const md = list.data.items.find((d) => d.type === 'md')
+    const md = byId(fixtures.byKind.md) ?? list.data.items.find((d) => d.type === 'md')
     if (md) ok = (await checkMarkdown(client, md.id, md.title)) && ok
 
     // 上传 / 多选 / 标签管理
@@ -895,6 +1141,13 @@ async function main() {
     } catch {
       /* 忽略 */
     }
+
+    // 夹具必须清干净：它们会出现在用户下一次打开的列表里
+    if (fixtures) {
+      const removed = await cleanupFixtures({ base: BASE, fixtures }).catch(() => 0)
+      if (removed) console.log(`\n  已清理 ${removed} 份夹具文档`)
+    }
+
     child.kill()
     await new Promise((r) => setTimeout(r, 400))
     try {

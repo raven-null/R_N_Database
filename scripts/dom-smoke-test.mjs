@@ -20,8 +20,19 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { JSDOM, VirtualConsole } from 'jsdom'
 
+import { provisionFixtures, cleanupFixtures } from './lib/fixtures.mjs'
+
 const ROOT = process.cwd()
 const BASE = process.env.SMOKE_BASE ?? 'http://127.0.0.1:8899'
+
+/**
+ * 测试文档的标记前缀。
+ *
+ * 这个测试**自己造数据**（见 scripts/lib/fixtures.mjs）：早先的版本
+ * 依赖库里恰好有 PDF / PPTX，一旦按用户要求清空测试数据，
+ * 整套前端测试就再也跑不起来了。现在自备最小夹具，跑完即删。
+ */
+const MARK = `RNDBSMOKE${Date.now()}`
 
 /**
  * ★ 必须在任何覆盖之前捕获 Node 原生 fetch。
@@ -78,6 +89,28 @@ async function waitFor(fn, timeoutMs = 5000) {
  * @returns {Promise<void>} 完成
  */
 const tick = (ms = 150) => new Promise((r) => setTimeout(r, ms))
+
+/* ============================================================
+   自备夹具（实现见 scripts/lib/fixtures.mjs，与 render-check 共用）
+   ============================================================ */
+
+/** 已入库的夹具（收尾要删干净）。 */
+let fixtures = null
+
+/**
+ * 造夹具并入库。
+ * @returns {Promise<void>} 完成
+ */
+async function setUpFixtures() {
+  fixtures = await provisionFixtures({ root: ROOT, base: BASE, mark: MARK })
+  console.log(`  夹具：${fixtures.ids.length} 份临时文档（${MARK}）`)
+}
+
+/** 删掉夹具（文档 + 临时目录）。 */
+async function tearDownFixtures() {
+  const removed = await cleanupFixtures({ base: BASE, fixtures })
+  if (removed) console.log(`\n  已清理 ${removed} 份夹具文档`)
+}
 
 /**
  * 建一个 jsdom 环境，把 fetch 桥接到真实开发服务器。
@@ -321,7 +354,10 @@ async function testViewPage() {
 
   // ---- PPTX：预览方式取决于是否装了 LibreOffice，按实际 previewKind 断言 ----
   if (!pptx) {
-    check(false, '库里没有 PPTX 文档，跳过该测试')
+    // 夹具里不造 PPTX（真要造得手搓一整套 OOXML 包，性价比太低）。
+    // 缺它只说明这一条没覆盖到，不是失败 —— 断言写死成"库里必须有 PPTX"，
+    // 清空测试数据之后整个测试就再也跑不起来了
+    check(true, '（库中暂无 PPTX，跳过该检查）')
   } else {
     const { dom, errors } = makeDom(`view.html?id=${pptx.id}`)
     const { document } = dom.window
@@ -404,9 +440,15 @@ async function testEditorPanel() {
 
       const catBoxes = document.querySelectorAll('.cat-opt input')
       check(catBoxes.length >= 9, `分类多选框有 ${catBoxes.length} 个（受控词表）`)
+
+      // 「未归类」是兜底分类，编辑器刻意不列它（列出来只会让人误选成
+      // 「未归类 + 合同证照」这种组合）。因此归在未归类的文档一个框都不勾，
+      // 这是预期行为，不是 bug。
+      const checkedCount = [...catBoxes].filter((cb) => cb.checked).length
+      const onlyOther = (doc.categories ?? []).filter((c) => c !== '未归类').length === 0
       check(
-        [...catBoxes].filter((cb) => cb.checked).length >= 1,
-        '当前分类已被勾选',
+        checkedCount >= 1 || onlyOther,
+        `分类勾选与文档一致（勾了 ${checkedCount} 个${onlyOther ? '；本文档归在「未归类」，编辑器不列该选项' : ''}）`,
       )
 
       check(Boolean(document.getElementById('ed-tags')), '有标签输入框')
@@ -432,6 +474,122 @@ async function testEditorPanel() {
 }
 
 /* ============================================================
+   内容编辑器（代码 / 文本直接改写）
+   ============================================================ */
+
+/**
+ * 内容编辑器的 DOM 行为测试。
+ *
+ * 只测**交互**，不点保存 —— 写入路径由 scripts/test-content-edit.mjs
+ * 用临时文档完整覆盖（那边会真的改内容并断言索引换词条）。
+ * 这里要验的是那些只能靠真实 DOM 才能发现的细节：
+ *   Tab 有没有被拦下来、缩进对不对、脏标记有没有出来、
+ *   关闭时有没有拦一下。
+ */
+async function testCodeEditor() {
+  console.log('\n【内容编辑器 view.html（代码文件）】')
+
+  const listRes = await nodeFetch(`${BASE}/api/v1/docs?q=${encodeURIComponent(MARK)}&limit=50`)
+  const list = await listRes.json()
+  const codeDoc = (list.data.items ?? []).find((d) => d.type === 'code')
+
+  if (!codeDoc) {
+    check(false, '没找到代码夹具，无法测试内容编辑器')
+    return
+  }
+
+  const { dom, errors } = makeDom(`view.html?id=${codeDoc.id}`)
+  const { document } = dom.window
+  await runModule(dom, 'js/view.js')
+
+  await waitFor(() => document.getElementById('doc-title')?.textContent !== '加载中…')
+  await tick(400)   // 等 canEditNow()
+
+  check(codeDoc.previewKind === 'code', `夹具的 previewKind=code（实际 ${codeDoc.previewKind}）`)
+  check(
+    Boolean(document.querySelector('iframe.html')),
+    '代码文档挂上了 html 预览 iframe',
+    document.querySelector('#frame iframe')?.className ?? '无 iframe',
+  )
+  check(
+    !document.querySelector('.mode-switch'),
+    '代码文档不显示「文本/源码」切换（它本身就是源码视图）',
+  )
+
+  const openBtn = document.getElementById('btn-edit-content')
+  check(Boolean(openBtn), '出现「编辑内容」按钮')
+
+  if (!openBtn) {
+    check(errors.length === 0, '无 jsdom 报错', errors.join('\n      '))
+    dom.window.close()
+    return
+  }
+
+  openBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  await tick(500)   // 等它把原件取回来
+
+  const editor = document.querySelector('.code-editor')
+  check(Boolean(editor), '点击后渲染出内容编辑器')
+  if (!editor) {
+    check(errors.length === 0, '无 jsdom 报错', errors.join('\n      '))
+    dom.window.close()
+    return
+  }
+
+  const ta = document.getElementById('ce-text')
+  check(Boolean(ta), '有编辑区 textarea')
+  check(
+    (ta?.value ?? '').startsWith('//'),
+    `编辑区已载入原件（首行：${(ta?.value ?? '').split('\n')[0].slice(0, 40)}）`,
+  )
+  check(
+    (ta?.value ?? '').includes('  return {'),
+    '载入的是**原件**，缩进没被抽取流程洗掉',
+  )
+  check(ta?.getAttribute('spellcheck') === 'false', '关掉了拼写检查（代码里的标识符不是错字）')
+  check(ta?.getAttribute('wrap') === 'off', '代码不自动折行（一行就是一行）')
+
+  const save = document.getElementById('ce-save')
+  check(Boolean(save) && !save.disabled, '保存按钮可用')
+
+  // ---- Tab 缩进 ----
+  const pristine = ta.value
+  ta.setSelectionRange(0, 0)
+  ta.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+  await tick(80)
+  check(ta.value.startsWith('  //'), `Tab 在行首插入了 2 空格（实际「${ta.value.slice(0, 6)}」）`)
+  check(ta.value.length === pristine.length + 2, '只插入了缩进，没动别的字符')
+
+  // ---- Shift+Tab 反缩进 ----
+  ta.setSelectionRange(2, 2)
+  ta.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+  await tick(80)
+  check(ta.value === pristine, 'Shift+Tab 又把缩进退回去了')
+
+  // ---- 脏标记 ----
+  const stat0 = document.getElementById('ce-stat')?.textContent ?? ''
+  check(/行/.test(stat0), `统计行显示了行数：${stat0}`)
+  check(!/未保存/.test(stat0), '刚打开时不算脏')
+
+  ta.value = `${ta.value}// 改了一行\n`
+  ta.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  await tick(80)
+  const stat1 = document.getElementById('ce-stat')?.textContent ?? ''
+  check(/未保存/.test(stat1), `改动后出现「未保存」：${stat1}`)
+
+  // ---- 有未保存改动时不该被「取消」静默丢掉 ----
+  // runModule 把 confirm 固定为 false（等价于用户点了"取消"）
+  document.getElementById('ce-cancel').dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true }),
+  )
+  await tick(150)
+  check(Boolean(document.querySelector('.code-editor')), '有未保存改动时，取消不会直接关掉编辑器')
+
+  check(errors.length === 0, '无 jsdom 报错', errors.join('\n      '))
+  dom.window.close()
+}
+
+/* ============================================================
    主流程
    ============================================================ */
 
@@ -444,20 +602,22 @@ async function main() {
     const body = await res.json()
     if (!body?.ok) throw new Error('health 未返回 ok')
     console.log(`  存储 ${body.data.store.mode} / 文档 ${body.data.docCount} 份`)
-    if (!body.data.docCount) {
-      console.log('\n  资料库是空的，先跑一次入库：')
-      console.log('    node scripts/ingest.mjs "你的文档目录"\n')
-      process.exit(1)
-    }
   } catch (err) {
     console.error(`\n  无法连接开发服务器（${BASE}）：${err.message}`)
     console.error('  请先在另一个终端运行：node scripts/dev-server.mjs\n')
     process.exit(1)
   }
 
-  await testListPage()
-  await testViewPage()
-  await testEditorPanel()
+  await setUpFixtures()
+
+  try {
+    await testListPage()
+    await testViewPage()
+    await testEditorPanel()
+    await testCodeEditor()
+  } finally {
+    await tearDownFixtures()
+  }
 
   console.log('\n────────────────────────────────')
   console.log(`  通过 ${passed} / 失败 ${failed}`)

@@ -1037,6 +1037,44 @@ iframe {
 .editor-msg.ok { color: var(--ok); }
 .editor-msg.err { color: var(--bad); }
 
+/* ============================================================
+   内容编辑器（代码 / Markdown / 纯文本）
+   ============================================================ */
+
+.code-edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.code-edit-bar .spacer { flex: 1; }
+.code-edit-bar .dirty { color: var(--warn, #b45309); font-weight: 600; }
+
+/* 等宽 + 不自动换行（由 wrap 属性控制，这里只管字体与行高）。
+   高度用视口单位：编辑代码时纵向空间越多越好，
+   同时留出顶栏与操作区，保证按钮始终可见。 */
+.code-edit {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 46vh;
+  max-height: 74vh;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  /* 制表符按 2 列显示，与 INDENT 一致，缩进层级看起来才对称 */
+  tab-size: 2;
+  resize: vertical;
+  outline: none;
+}
+.code-edit:focus { border-color: var(--accent); }
+.code-edit:disabled { opacity: .6; }
+
 @media (max-width: 720px) {
   .editor { margin-left: 12px; margin-right: 12px; padding: 14px; }
+  .code-edit { min-height: 40vh; font-size: 12.5px; }
 }

@@ -99,6 +99,7 @@ export async function searchRoute(req, url) {
         title: doc.title,
         originalName: doc.originalName,
         type: doc.type,
+        ext: doc.ext,
         categories: doc.categories ?? [],
         tags: doc.tags ?? [],
         summary: doc.summary ?? '',

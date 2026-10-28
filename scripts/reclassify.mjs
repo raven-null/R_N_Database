@@ -16,7 +16,7 @@
  *   node scripts/reclassify.mjs --dry-run    # 只报告变化，不写入
  *   node scripts/reclassify.mjs --ai         # 顺带用 AI 补摘要与分类
  *   node scripts/reclassify.mjs --pinyin-only    # 只补拼音（派生字段）
- *   node scripts/reclassify.mjs --previews-only  # 只重建预览件（如 Markdown 渲染件）
+ *   node scripts/reclassify.mjs --previews-only  # 只重建预览件（Markdown 渲染件 / 代码高亮件 / Office→PDF）
  *
  * @module scripts/reclassify
  */
@@ -26,6 +26,7 @@ import { loadEnv } from './env.mjs'
 import { loadTaxonomy, classify, resolveAIConfig } from './lib/classify.mjs'
 import { pinyinForms } from './lib/pinyin.mjs'
 import { renderMarkdownPage } from './lib/markdown.mjs'
+import { renderCodePage } from '../netlify/functions/_lib/code-view.mjs'
 import { convertBytesToPdfDetailed, OFFICE_TYPES, officeEngineStatus } from './lib/office.mjs'
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
@@ -171,6 +172,23 @@ async function main() {
 
       if (!buf) {
         missing += 1
+      } else if (doc.type === 'code') {
+        // 代码：重渲染带行号 + 语法高亮的只读预览。
+        // 这条分支是「渲染器本身改了」时的升级路径 —— 例如行数算法修正
+        // （文件末尾的换行曾多算一行，导致行号列比代码块高一个行高）。
+        // 用原件字节渲染，不碰抽取的正文。
+        const rendered = renderCodePage(Buffer.from(buf).toString('utf8'), {
+          title: doc.title,
+          ext: doc.ext,
+        })
+        await previewStore.set(`${doc.id}.html`, rendered.html)
+        await metaStore.set(doc.id, JSON.stringify({
+          ...doc,
+          previewKind: 'code',
+          previewNote: rendered.highlighted ? '' : '未识别语言或文件过大，按纯文本显示',
+          updatedAt: new Date().toISOString(),
+        }))
+        rebuilt += 1
       } else if (doc.type === 'md') {
         // ★ 用**原件字节**渲染，而不是抽取的正文：
         // 抽取时 cleanText 会压缩空格、去掉行首缩进、合并空行，

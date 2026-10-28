@@ -13,8 +13,9 @@
  */
 
 import { fetchDoc, fetchTaxonomy, authedUrl } from './api.js'
-import { esc, fmtSize, fmtDate, typeInfo, param } from './util.js'
+import { esc, fmtSize, fmtDate, typeInfo, param, isEditableType } from './util.js'
 import { mountEditor, canEditNow } from './edit.js'
+import { mountCodeEditor } from './code-editor.js'
 
 const el = {
   title: document.getElementById('doc-title'),
@@ -32,6 +33,9 @@ const el = {
 /** 当前文档，供面板/编辑器复用。 */
 let current = null
 
+/** 分类词表缓存（编辑元数据时要用；只拉一次）。 */
+let taxonomyCache = null
+
 /**
  * Markdown 的双视图模式。
  * 默认「渲染」—— 打开就能读；「源码」是代码格式（等宽 + 行号）。
@@ -48,6 +52,15 @@ function isDualView(doc) {
 }
 
 /**
+ * 该文档能否在网页上直接改内容（代码 / Markdown / 纯文本）。
+ * @param {object} doc - 元数据
+ * @returns {boolean} 是否可编辑内容
+ */
+function editableContent(doc) {
+  return isEditableType(doc?.type)
+}
+
+/**
  * 渲染标题与元信息。
  * @param {object} doc - 元数据
  */
@@ -57,7 +70,7 @@ function renderHeader(doc) {
   el.title.title = doc.title
 
   const bits = [
-    `<b>${esc(typeInfo(doc.type).label)}</b>`,
+    `<b>${esc(typeInfo(doc.type, doc.ext).label)}</b>`,
     fmtSize(doc.size),
     doc.pages ? `${doc.pages} 页` : '',
     doc.author ? esc(doc.author) : '',
@@ -102,6 +115,7 @@ function renderActions(doc, canEdit) {
   `
 
   el.panelActions.innerHTML = `
+    ${canEdit && editableContent(doc) ? '<button class="btn" id="btn-edit-content">编辑内容</button>' : ''}
     ${canEdit ? '<button class="btn" id="btn-edit">编辑元数据</button>' : ''}
     <a class="btn ghost" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file?inline=1`))}" target="_blank" rel="noopener">新窗口打开原件</a>
   `
@@ -211,6 +225,7 @@ function renderPreview(doc) {
   if (doc.previewKind === 'markdown') {
     hints.push(mdMode === 'source' ? '源码视图（等宽 + 行号）' : '渲染视图')
   }
+  if (doc.previewKind === 'code') hints.push('代码预览（等宽 + 行号）')
   if (doc.previewNote) hints.push(esc(doc.previewNote))
   if (/HTML 降级/.test(doc.previewNote ?? '')) hints.push('安装 LibreOffice 可转为保真度更高的 PDF 预览')
   if (hints.length) el.notice.innerHTML = `<div class="notice">${hints.join('　·　')}</div>`
@@ -219,20 +234,20 @@ function renderPreview(doc) {
 /**
  * 打开编辑器（收起详情面板，把纵向空间让给表单）。
  * @param {boolean} canEdit - 是否有编辑权限
- * @param {object|null} taxonomy - 词表
  */
-function openEditor(canEdit, taxonomy) {
+function openEditor(canEdit) {
   if (!canEdit || !current) return
   togglePanel(false)
 
   const mount = (doc) => mountEditor(el.editor, {
     doc,
-    taxonomy,
+    taxonomy: taxonomyCache,
     canEdit: true,
     onSaved: (next) => {
       current = next
       renderHeader(next)
       renderActions(next, true)
+      rewirePanelButtons(true)
       // 重建编辑器以反映刚落盘的值
       mount(next)
     },
@@ -241,6 +256,56 @@ function openEditor(canEdit, taxonomy) {
 
   mount(current)
   el.editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
+/**
+ * 打开内容编辑器（直接改原件：代码 / Markdown / 纯文本）。
+ *
+ * 保存成功后要**换掉预览 iframe 的地址**：预览件的 URL 版本号取自
+ * updatedAt，内容一改它变，浏览器才会去取新的渲染结果
+ * （否则看到的是编辑前的旧预览，会以为没保存上）。
+ *
+ * @param {boolean} canEdit - 是否有编辑权限
+ */
+function openContentEditor(canEdit) {
+  if (!canEdit || !current) return
+  togglePanel(false)
+
+  mountCodeEditor(el.editor, {
+    doc: current,
+    canEdit: true,
+    onSaved: (data) => {
+      if (data?.doc) {
+        current = { ...current, ...data.doc }
+        renderHeader(current)
+        renderActions(current, true)
+      }
+      // 预览按新版本号重取
+      const frame = el.frame.querySelector('iframe')
+      if (frame) frame.src = previewSrc(current, mdMode)
+      else renderPreview(current)
+      rewirePanelButtons(true)
+    },
+    onCancel: () => {},
+  })
+
+  el.editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
+/**
+ * 重新绑定详情面板里的按钮。
+ *
+ * 面板内容是 innerHTML 重建的，重建后旧监听器全部失效 ——
+ * 不重绑就会出现"点了一次按钮之后，按钮再也不响应"。
+ *
+ * @param {boolean} canEdit - 是否有编辑权限
+ */
+function rewirePanelButtons(canEdit) {
+  const editBtn = document.getElementById('btn-edit')
+  if (editBtn) editBtn.onclick = () => openEditor(canEdit, taxonomyCache)
+
+  const contentBtn = document.getElementById('btn-edit-content')
+  if (contentBtn) contentBtn.onclick = () => openContentEditor(canEdit)
 }
 
 /**
@@ -262,10 +327,9 @@ async function main() {
     renderPreview(doc)
 
     if (editable) {
-      const btn = document.getElementById('btn-edit')
       // 词表用于分类多选框；拿不到也不阻塞查看
-      const taxonomy = await fetchTaxonomy().catch(() => null)
-      btn?.addEventListener('click', () => openEditor(true, taxonomy))
+      taxonomyCache = await fetchTaxonomy().catch(() => null)
+      rewirePanelButtons(true)
     }
   } catch (err) {
     el.title.textContent = '打开失败'

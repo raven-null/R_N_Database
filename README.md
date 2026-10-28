@@ -91,10 +91,27 @@ DOCS_AI_ENV=E:\01-smart-workstation\.env
   → SHA-256 去重（同内容自动识别；同路径不同内容删旧迎新）
   → 抽元数据（标题/作者/页数/创建时间）
   → 抽正文：pdfjs-dist(PDF) · mammoth(docx) · exceljs(xlsx) · JSZip(pptx)
+             · 纯文本类（md/txt/csv/代码）直接读，代码不做清洗（缩进即语义）
   → 分类打标：规则层始终跑；配了 ZHIPU_API_KEY 再叠 AI 层
-  → 生成预览件：PDF 直接用原件；Office 装 LibreOffice 则转 PDF，否则 HTML 降级
+  → 生成预览件：PDF 直接用原件；Office 装 LibreOffice 则转 PDF，否则 HTML 降级；
+                代码渲染成带行号 + 语法高亮的只读页
   → 直写存储 → 重建倒排索引
 ```
+
+**支持的格式**：PDF / DOCX / XLSX / PPTX（含旧版 .doc/.xls/.ppt）、
+Markdown、纯文本、CSV，以及约 60 种代码与配置文件后缀
+（`.ts .js .py .go .rs .java .sql .ps1 .json .yaml .toml .css .html .sh` 等）。
+代码只存、只看、只改，**永不执行**。
+
+### 在网页上直接改内容
+
+代码 / Markdown / 纯文本可以在阅读页点「编辑内容」直接改写，保存后
+原件、抽取正文、预览件、元数据与**检索索引**同时更新，无需重跑脚本。
+
+编辑区是朴素 textarea（富文本编辑器会把 Tab 变空格、吃掉行尾空白，
+存回去的就不是原来那个文件）：Tab 插入 2 空格、Shift+Tab 反缩进、
+Ctrl/⌘+S 保存、有未保存改动时拦一下关闭。两个标签页同时改会返回 409，
+不会互相覆盖。Office / PDF 是二进制容器，网页改不了结构，仍走重新上传。
 
 **标题处理有个坑值得说明**：PDF/PPTX 的内嵌 Title 常是 `about:blank`、
 `空白演示` 这类垃圾值。若直接采信，列表页会显示一串无意义标题，
@@ -137,6 +154,30 @@ DOCS_AI_ENV=E:\01-smart-workstation\.env
 
 也可通过 API 使用：`GET /api/v1/docs?q=jlxz`。
 注意 `/api/v1/search`（全文检索）是纯文本的，不含拼音：前者查元数据，后者查正文。
+
+## 测试
+
+```bash
+npm run check              # 构建护栏：结构/函数可加载/配置/密钥泄漏
+npm run test:classify      # 分类规则回归（16 项）
+npm run test:index         # 增量索引单元测试（20 项，自带临时存储目录）
+npm run test:access        # 访问控制回归（37 项，自带隔离实例）
+npm run test:api           # 写操作回归（30 项）
+npm run test:batch         # 批量打标签/改分类（49 项）
+npm run test:edit          # 内容编辑：原件/正文/预览/索引全链路（54 项）
+npm run test:markdown      # Markdown 双视图（21 项）
+npm run test:dom           # 前端 jsdom 冒烟（55 项）
+npm run test:render        # 真实浏览器渲染检查（CDP，含截图）
+```
+
+依赖服务器的几项（`test:api` / `test:batch` / `test:edit` / `test:markdown` /
+`test:dom`）需要先 `npm run dev`。
+
+两条约定：
+
+- **前端测试自己造夹具**（`scripts/lib/fixtures.mjs`：一份代码、一份 Markdown、
+  一页手搓的最小 PDF），跑完即删 —— 不依赖库里恰好有什么，也不碰真实资料。
+- **断言不写死语料**。写死「简历第一版」这类标题的测试，在库里内容一变就全崩。
 
 ## 部署流程（GitHub → Netlify 自动部署）
 
@@ -209,10 +250,11 @@ Netlify Token 等。push 前跑一次即可。
 ```
 ├─ netlify.toml              Netlify 配置（Node 版本钉死、安全头、缓存策略）
 ├─ netlify/functions/        Functions v2（ESM，各自声明 config.path）
-│  ├─ health.mjs             GET /api/v1/health
-│  └─ _lib/                  store · auth · cors · respond
+│  ├─ api.mjs                /api/v1/* 统一路由（自解析路径，本地与线上一致）
+│  └─ _lib/                  store · auth · respond · index-store · routes/…
 ├─ public/                   静态站（零构建，ES 模块）
-├─ scripts/                  check · dev-server · probe · env ·（后续 ingest）
+├─ scripts/                  ingest · reindex · reclassify · dev-server · check
+│  └─ lib/                   extract · classify · office · fixtures（测试夹具）
 └─ docs/                     方案与 API 契约
 ```
 
@@ -240,7 +282,18 @@ GET  /api/v1/taxonomy            分类树 + 标签表（含计数）
 GET  /api/v1/manifest            全量清单 + 索引版本（支持 ETag → 304）
 POST /api/v1/auth/login          密码换角色
 GET  /api/v1/auth/status         当前鉴权状态
+
+PATCH  /api/v1/docs/{id}                 改元数据（标题/分类/标签/摘要/可见性）
+PUT    /api/v1/docs/{id}/content         改内容（仅代码 / Markdown / 纯文本）
+DELETE /api/v1/docs/{id}                 删除（原件/预览/正文/元数据/索引同时清）
+POST   /api/v1/docs/batch                批量：加标签/删标签/改分类/标复查/删除
+PATCH  /api/v1/tags/{name}               重命名标签（全库同步）
+DELETE /api/v1/tags/{name}               删除标签
+POST   /api/v1/inbox?name=               上传到暂存区（两阶段入库的第一阶段）
 ```
+
+写操作一律要求 admin 令牌；read 令牌（工作站 / 博客）只能读。
+未登录访客只能看到标了「公开」的那些文档。
 
 统一响应：成功 `{ ok:true, data }`，失败 `{ ok:false, error:{code,message} }`。
 鉴权三通道：`X-Auth-Token` 头、`?token=`、`?exp=&sig=` 短期签名 URL。

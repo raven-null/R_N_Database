@@ -25,6 +25,9 @@ import { extname, basename } from 'node:path'
 // 类型识别统一走函数侧共享模块：上传接口与入库必须用同一套判断，
 // 否则会出现「传得上来但入不了库」这类不一致
 import { detectType, mimeOf, titleFromFilename } from '../../netlify/functions/_lib/file-types.mjs'
+// 正文规整同样走共享实现：网页编辑内容之后重算的正文，
+// 必须与入库时算出来的一字不差
+import { cleanText, plainTextOf } from '../../netlify/functions/_lib/plain-text.mjs'
 
 export { detectType, mimeOf, titleFromFilename }
 
@@ -37,7 +40,7 @@ const MAX_TEXT_CHARS = 2_000_000
  * @returns {boolean} 是否支持
  */
 export function canExtractText(type) {
-  return ['pdf', 'docx', 'xlsx', 'pptx', 'md', 'txt', 'csv'].includes(type)
+  return ['pdf', 'docx', 'xlsx', 'pptx', 'md', 'txt', 'csv', 'code'].includes(type)
 }
 
 /* ============================================================
@@ -45,19 +48,9 @@ export function canExtractText(type) {
    ============================================================ */
 
 /**
- * 清洗抽取到的文本：统一空白、去掉零宽字符、压缩多余空行。
- * @param {string} raw - 原始文本
- * @returns {string} 清洗后文本
+ * 清洗抽取到的文本 —— 实现已移到 _lib/plain-text.mjs（见那里的说明），
+ * 这里只做转出，保持既有调用点不变。
  */
-function cleanText(raw) {
-  return String(raw ?? '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')   // 零宽字符
-    .replace(/[ \t\u00A0]+/g, ' ')            // 连续空格/不换行空格
-    .replace(/ *\n */g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}
 
 /**
  * 从文件名推一个兜底标题 —— 已由 _lib/file-types.mjs 在顶部统一导入并转出，
@@ -405,7 +398,11 @@ function slideNo(name) {
    ============================================================ */
 
 /**
- * 抽取 Markdown / 纯文本 / CSV。
+ * 抽取 Markdown / 纯文本 / CSV / 代码。
+ *
+ * 代码与纯文本同路：直接读 UTF-8，**不做任何清洗** ——
+ * 缩进、空行、行尾空白都是代码的一部分，洗掉就失真了。
+ *
  * @param {Buffer} buf - 文件内容
  * @param {string} type - 规范化类型
  * @returns {{html:string, text:string, meta:object}} 结果
@@ -420,8 +417,9 @@ function extractPlain(buf, type) {
     return { html, text: cleanText(raw), meta: { rowCount: rows.length } }
   }
 
-  // Markdown 原样作为文本存；前端按需渲染
-  return { html: '', text: cleanText(raw), meta: {} }
+  // 代码保留原文（只统一换行为 LF），Markdown/纯文本按清洗规则压缩空白。
+  // 两种行为都在 plainTextOf 里，网页编辑走的是同一份实现。
+  return { html: '', text: plainTextOf(raw, type), meta: {} }
 }
 
 /* ============================================================
@@ -490,7 +488,7 @@ export async function extractFile(filePath, type) {
       return { ...base, ok: true, html, text: text.slice(0, MAX_TEXT_CHARS), title: meta.title, author: meta.author, docCreatedAt: meta.docCreatedAt, pages: meta.slides ?? null }
     }
 
-    if (type === 'md' || type === 'txt' || type === 'csv') {
+    if (type === 'md' || type === 'txt' || type === 'csv' || type === 'code') {
       const { html, text, meta } = extractPlain(buf, type)
       return { ...base, ok: true, html, text: text.slice(0, MAX_TEXT_CHARS), pages: null, ...meta }
     }

@@ -199,7 +199,7 @@ function docRow(doc) {
     <div class="doc${checked ? ' picked' : ''}" data-id="${esc(doc.id)}">
       ${selecting ? `<label class="doc-check"><input type="checkbox" data-check="${esc(doc.id)}"${checked ? ' checked' : ''}></label>` : ''}
       <a class="doc-link" href="/view.html?id=${encodeURIComponent(doc.id)}">
-        ${typeBadge(doc.type)}
+        ${typeBadge(doc.type, doc.ext)}
         <div class="doc-main">
           <div class="doc-title">${esc(doc.title)}${doc.needsReview ? '<span class="flag">待复查</span>' : ''}</div>
           ${doc.summary ? `<div class="doc-summary">${esc(doc.summary)}</div>` : ''}
@@ -230,7 +230,7 @@ function renderDeepResults(result) {
     + result.items.map((it) => `
       <div class="doc deep" data-id="${esc(it.id)}">
         <a class="doc-link" href="/view.html?id=${encodeURIComponent(it.id)}${state.q ? `&q=${encodeURIComponent(state.q)}` : ''}">
-          ${typeBadge(it.type)}
+          ${typeBadge(it.type, it.ext)}
           <div class="doc-main">
             <div class="doc-title">${esc(it.title)}</div>
             ${it.snippet ? `<div class="doc-summary snippet">${esc(it.snippet)}</div>` : ''}

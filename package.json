@@ -10,6 +10,7 @@
   "dependencies": {
     "@netlify/blobs": "^8.2.0",
     "exceljs": "^4.4.0",
+    "highlight.js": "^11.12.0",
     "jszip": "^3.10.2",
     "mammoth": "^1.13.0",
     "marked": "^18.1.1",
@@ -30,6 +31,8 @@
     "test:api": "node scripts/test-write-api.mjs",
     "test:render": "node scripts/render-check.mjs",
     "test:markdown": "node scripts/test-markdown-view.mjs",
+    "test:edit": "node scripts/test-content-edit.mjs",
+    "test:index": "node scripts/test-index-delta.mjs",
     "process-pending": "node scripts/process-pending.mjs",
     "test:batch": "node scripts/test-batch-tags.mjs",
     "test:access": "node scripts/test-access.mjs"

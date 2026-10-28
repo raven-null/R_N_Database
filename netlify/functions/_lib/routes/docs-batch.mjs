@@ -18,7 +18,7 @@
 
 import { checkAuth } from '../auth.mjs'
 import { ok, badRequest, notFound, unauthorized, forbidden, serverError } from '../respond.mjs'
-import { readAllMeta, readMeta, readTaxonomy } from '../repo.mjs'
+import { readAllMeta, readMeta, readDocText, readTaxonomy } from '../repo.mjs'
 import { getDocsStore, STORES } from '../store.mjs'
 import { applyDocChangesBulk } from '../index-store.mjs'
 
@@ -246,6 +246,11 @@ async function batchDelete(req, ids) {
       continue
     }
 
+    // ★ 正文必须在删之前读出来：摘词条要用**旧正文**算旧词频。
+    // 先删 blob 再更索引，正文独有的词会永久留在分片里（库越删越脏）。
+    const oldText = await readDocText(id).catch(() => null)
+    const oldBody = (oldText?.pages ?? []).join('\n')
+
     // 原件 key 带扩展名，按前缀找更稳妥
     const listed = await filesStore.list({ prefix: `${id}.` }).catch(() => ({ blobs: [] }))
     for (const blob of listed.blobs ?? []) {
@@ -260,7 +265,7 @@ async function batchDelete(req, ids) {
       metaStore.delete(id).catch(() => {}),
     ])
 
-    changes.push({ oldMeta: meta, newMeta: null })
+    changes.push({ oldMeta: meta, newMeta: null, oldBody })
   }
 
   let index = null

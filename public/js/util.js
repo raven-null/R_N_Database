@@ -52,6 +52,9 @@ const TYPE_INFO = {
   md: { label: 'MD', color: '#6b7280' },
   txt: { label: 'TXT', color: '#6b7280' },
   csv: { label: 'CSV', color: '#2f855a' },
+  // 代码是一大类（几十种后缀），徽标上显示真实后缀而不是笼统的 CODE，
+  // 否则一屏 JSON / TS / PY 全看起来一样
+  code: { label: 'CODE', color: '#8250df' },
   'doc-legacy': { label: 'DOC', color: '#94a3b8' },
   'xls-legacy': { label: 'XLS', color: '#94a3b8' },
   'ppt-legacy': { label: 'PPT', color: '#94a3b8' },
@@ -59,21 +62,44 @@ const TYPE_INFO = {
 
 /**
  * 取类型信息。
+ *
  * @param {string} type - 规范化类型
+ * @param {string} [ext] - 扩展名（可选，代码类型用它显示具体后缀）
  * @returns {{label:string,color:string}} 类型信息
  */
-export function typeInfo(type) {
-  return TYPE_INFO[type] ?? { label: String(type ?? '?').toUpperCase(), color: '#6b7280' }
+export function typeInfo(type, ext) {
+  const info = TYPE_INFO[type] ?? { label: String(type ?? '?').toUpperCase(), color: '#6b7280' }
+  if (type === 'code' && ext) {
+    let e = String(ext).replace(/^\./, '').toUpperCase()
+    // 超长后缀（.markdown、.svelte）在窄徽标里会撑破布局
+    if (e.length > 5) e = 'CODE'
+    return { label: e, color: info.color }
+  }
+  return info
 }
 
 /**
  * 生成类型徽标 HTML。
  * @param {string} type - 类型
+ * @param {string} [ext] - 扩展名
  * @returns {string} HTML
  */
-export function typeBadge(type) {
-  const info = typeInfo(type)
+export function typeBadge(type, ext) {
+  const info = typeInfo(type, ext)
   return `<span class="type-badge" style="--tc:${info.color}">${esc(info.label)}</span>`
+}
+
+/**
+ * 该类型是否支持在网页上直接改内容。
+ *
+ * 服务端还有一份权威判断（`_lib/file-types.mjs` 的 isEditableType）——
+ * 这里只决定「要不要显示按钮」，真正的拦截在接口里。
+ *
+ * @param {string} type - 规范化类型
+ * @returns {boolean} 是否可编辑
+ */
+export function isEditableType(type) {
+  return type === 'code' || type === 'md' || type === 'txt'
 }
 
 /**

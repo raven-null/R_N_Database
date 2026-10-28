@@ -145,7 +145,10 @@ export async function writeIndex(index) {
  * 批量打标签要改上百份，逐份调用会把同一批分片反复读改写上百次 ——
  * 既慢又可能互相覆盖。这里一次性把受影响分片读进内存、改完再写回一次。
  *
- * @param {Array<{oldMeta:object, newMeta:object|null}>} changes - 变更列表；newMeta 为 null 表示删除
+ * @param {Array<{oldMeta:object, newMeta:object|null, oldBody?:string}>} changes
+ *   变更列表；newMeta 为 null 表示删除。
+ *   oldBody 用于「删除前已经拿不到正文」的场景（删文档时 blob 已先删掉，
+ *   调用方必须在删之前把正文读出来传进来，否则正文独有的词条摘不干净）。
  * @returns {Promise<{ok:boolean, version:string, shardsTouched:number, docCount:number, applied:number}>} 结果
  */
 export async function applyDocChangesBulk(changes) {
@@ -167,13 +170,17 @@ export async function applyDocChangesBulk(changes) {
   const work = []
   const touched = new Set()
 
-  for (const { oldMeta, newMeta } of changes) {
+  for (const { oldMeta, newMeta, oldBody } of changes) {
     const id = (newMeta ?? oldMeta)?.id
     if (!id) continue
 
-    // 正文不变（元数据编辑不碰正文），读一次即可
-    const text = await textStore.get(id, { type: 'json' }).catch(() => null)
-    const body = (text?.pages ?? []).join('\n')
+    // 正文默认不变（元数据编辑不碰正文），读一次即可；
+    // 删除场景由调用方在删 blob 之前读出并通过 oldBody 传入
+    let body = oldBody
+    if (body === undefined) {
+      const text = await textStore.get(id, { type: 'json' }).catch(() => null)
+      body = (text?.pages ?? []).join('\n')
+    }
 
     const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), body) : new Map()
     const newTf = newMeta ? termCounts(metaTextOf(newMeta), body) : new Map()
@@ -294,14 +301,20 @@ function removeDocFromShards(shardBuf, id, tf) {
  * 增量更新：一份文档的元数据变化或被删除。
  *
  * 只读写受影响的分片，不重建全库。
- * 正文不变（元数据编辑不碰正文），所以该文档的词频可以从
- * 「新元数据 + 原正文」重新算出，与旧词频求差即可。
  *
- * @param {object} opts - { oldMeta, newMeta }，newMeta 为 null 表示删除
+ * 默认假设**正文不变**（改标题/分类/标签都不碰正文），所以只读一次
+ * doc-text，同一份正文用于算旧/新词频。
+ *
+ * ★ 但「网页上直接编辑内容」会改正文 —— 那种情况必须由调用方通过
+ * oldBody / newBody 传入两版正文。否则移除旧词条时用的是新正文，
+ * 旧内容独有的词会永远留在索引里（搜得到、打开却看不到）。
+ *
+ * @param {object} opts - { oldMeta, newMeta, oldBody?, newBody? }
+ *   newMeta 为 null 表示删除
  * @returns {Promise<{ok:boolean, version:string, shardsTouched:number, docCount:number}>} 结果
  */
 export async function applyDocChange(opts) {
-  const { oldMeta, newMeta } = opts
+  const { oldMeta, newMeta, oldBody, newBody } = opts
   const id = (newMeta ?? oldMeta)?.id
   if (!id) throw new Error('applyDocChange 需要文档 id')
 
@@ -313,12 +326,17 @@ export async function applyDocChange(opts) {
 
   const docs = (await store.get('docs', { type: 'json' })) ?? []
 
-  // 正文不变，读一次即可
-  const text = await textStore.get(id, { type: 'json' }).catch(() => null)
-  const body = (text?.pages ?? []).join('\n')
+  // 正文：调用方给了就用给的那版；没给说明正文没变，读一次库共用
+  let bodyFromStore = ''
+  if (oldBody === undefined || newBody === undefined) {
+    const t = await textStore.get(id, { type: 'json' }).catch(() => null)
+    bodyFromStore = (t?.pages ?? []).join('\n')
+  }
+  const bodyOld = oldBody ?? bodyFromStore
+  const bodyNew = newBody ?? bodyFromStore
 
-  const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), body) : new Map()
-  const newTf = newMeta ? termCounts(metaTextOf(newMeta), body) : new Map()
+  const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), bodyOld) : new Map()
+  const newTf = newMeta ? termCounts(metaTextOf(newMeta), bodyNew) : new Map()
 
   // 需要触碰的分片 = 旧词典 ∪ 新词典 所在的分片
   const touched = new Set()
