@@ -130,6 +130,32 @@ pptx 网页视图    20ms
 代价是图片多的文档体积会涨（base64 内联约 +33%），
 超过 4MB 就跳过网页版、只保留原始版式（入库日志会写明原因）。
 
+### 上传：单个文件、整个文件夹、或直接拖进来
+
+网页上传是**两阶段**的第一阶段：原件先进暂存区，重活留到本地跑
+`node scripts/process-pending.mjs`（构建机上没有 LibreOffice，也扛不住大文件）。
+
+- **上传** 按钮：选若干文件
+- **传文件夹** 按钮：选整个目录，**保留目录结构**
+- **拖拽**：文件和文件夹都能直接拖进右侧列表区
+
+整目录上传会先在浏览器侧筛一遍，并如实报出"传了什么、跳了什么、为什么"：
+
+| 情况 | 处理 |
+|---|---|
+| 不支持的类型（图片、`.zip`、无扩展名…） | 跳过，报出涉及的扩展名 |
+| 单个 > 20MB | 跳过，报出文件名（更大的请走命令行，那条路直写存储） |
+| 系统垃圾（`Thumbs.db`、`.DS_Store`、`~$锁文件`、`.tmp`） | 静默跳过，只报个数 |
+| 噪音目录（`node_modules`、`.git`、`__pycache__`、`.venv`…） | 整棵子树都不进 |
+| 库里/暂存区已有同样内容 | 按 SHA-256 识别，入库时自动去重 |
+
+目录结构会一路带下去：暂存区里显示 `合同/2025/xx.pdf`，入库时写进
+`sourcePath`（`upload://合同/2025/xx.pdf`），日后能追溯来源。
+同名文件靠这层路径区分，不会互相覆盖。
+
+上限是单次 500 个文件 / 2GB；再多请用命令行 ——
+`node scripts/ingest.mjs "目录"` 没有这些限制，也不经过网络。
+
 ### 在网页上直接改内容
 
 代码 / Markdown / 纯文本可以在阅读页点「编辑内容」直接改写，保存后
@@ -193,13 +219,14 @@ npm run test:api           # 写操作回归（30 项）
 npm run test:batch         # 批量打标签/改分类（49 项）
 npm run test:edit          # 内容编辑：原件/正文/预览/索引全链路（54 项）
 npm run test:office        # Office 网页视图：Word/Excel/PPT 与 PDF 对照（47 项）
+npm run test:upload        # 整文件夹上传：目录递归/跳过规则/来源路径（34 项）
 npm run test:markdown      # Markdown 双视图（21 项）
 npm run test:dom           # 前端 jsdom 冒烟（55 项）
 npm run test:render        # 真实浏览器渲染检查（CDP，含截图）
 ```
 
 依赖服务器的几项（`test:api` / `test:batch` / `test:edit` / `test:office` /
-`test:markdown` / `test:dom`）需要先 `npm run dev`。
+`test:upload` / `test:markdown` / `test:dom`）需要先 `npm run dev`。
 
 两条约定：
 
@@ -320,7 +347,7 @@ DELETE /api/v1/docs/{id}                 删除（原件/预览/正文/元数据
 POST   /api/v1/docs/batch                批量：加标签/删标签/改分类/标复查/删除
 PATCH  /api/v1/tags/{name}               重命名标签（全库同步）
 DELETE /api/v1/tags/{name}               删除标签
-POST   /api/v1/inbox?name=               上传到暂存区（两阶段入库的第一阶段）
+POST   /api/v1/inbox?name=&path=       上传到暂存区（两阶段入库的第一阶段）
 ```
 
 写操作一律要求 admin 令牌；read 令牌（工作站 / 博客）只能读。

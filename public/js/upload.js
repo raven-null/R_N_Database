@@ -1,5 +1,5 @@
 /**
- * 上传界面：选文件 + 拖拽上传 + 待处理清单。
+ * 上传界面：选文件 / 选整个文件夹 + 拖拽上传 + 待处理清单。
  *
  * ## 上传是两阶段的
  *
@@ -10,6 +10,26 @@
  *
  * 上传用原始字节（非 multipart/base64），最省内存。
  *
+ * ## 为什么"整个文件夹"要单独设计
+ *
+ * 一个真实的资料目录里，能入库的往往只是少数：
+ * 还有 `Thumbs.db`、`~$草稿.docx` 这种 Office 临时锁文件、`.git`、
+ * `node_modules`、几张截图、几个 200MB 的视频。如果照单全传：
+ *   - 大量无效文件占满暂存区，还得一个个手动移除
+ *   - 一个超大文件就能让整批失败
+ * 所以这里先**在浏览器侧筛一遍**：不支持的类型、超限体积、系统垃圾文件
+ * 都跳过并如实报数，用户能看到"传了什么、跳了什么、为什么"。
+ *
+ * 目录结构会保留：每个文件带着相对路径上传（`合同/2025/xx.pdf`），
+ * 入库时写进 `sourcePath`，暂存区里也能分清同名文件。
+ *
+ * ## 拖拽文件夹的坑
+ *
+ * `drop` 事件里 `dataTransfer.files` 对**文件夹**通常是空的 ——
+ * 必须走 `webkitGetAsEntry()` 递归读目录。而且 `readEntries()`
+ * 一次只返回一部分（Chrome 每次最多 100 项），要循环读到返回空数组为止，
+ * 否则大目录会**只上传前 100 个文件**且不报错。
+ *
  * @module public/js/upload
  */
 
@@ -19,14 +39,58 @@ import { authHeaders, apiFetch } from './api.js'
 /** 单文件上限，与服务端保持一致。 */
 const MAX_BYTES = 20 * 1024 * 1024
 
+/** 一次最多处理多少个文件（再多请走命令行，那个没有限制）。 */
+const MAX_FILES = 500
+
+/** 一次最多处理多少字节。 */
+const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+
+/** 并发上传数。串行 100 个文件太慢，全开又会把浏览器连接数打满。 */
+const CONCURRENCY = 3
+
+/**
+ * 系统/临时垃圾文件名（整目录上传时静默跳过）。
+ *
+ * 这些不是"用户想存进资料库的东西"，混进来只会让暂存区变成垃圾场。
+ */
+const NOISE_FILES = new Set([
+  'thumbs.db', 'desktop.ini', '.ds_store', '.localized', 'ehthumbs.db',
+])
+
+/** 整目录上传时跳过的目录名（含这些名字的整棵子树都不进）。 */
+const NOISE_DIRS = new Set([
+  'node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'venv',
+  '.idea', '.vscode', '.cache', '.npm', '.pnpm-store', '$RECYCLE.BIN',
+  'System Volume Information',
+])
+
+/**
+ * 判断是不是系统垃圾文件。
+ * @param {string} name - 文件名
+ * @returns {boolean} 是否跳过
+ */
+function isNoiseFile(name) {
+  const base = String(name).toLowerCase()
+  if (NOISE_FILES.has(base)) return true
+  // Office 的锁文件 / 临时文件：~$草稿.docx、.~lock.xx#
+  if (base.startsWith('~$') || base.startsWith('.~lock.')) return true
+  if (base.endsWith('.tmp') || base.endsWith('.crdownload') || base.endsWith('.part')) return true
+  return false
+}
+
 /**
  * 把单个文件传到暂存区。
  *
  * @param {File} file - 浏览器 File 对象
+ * @param {string} [relPath] - 相对路径（整目录上传时才有）
  * @returns {Promise<object>} 服务端返回的记录
  */
-async function uploadOne(file) {
-  const res = await fetch(`/api/v1/inbox?name=${encodeURIComponent(file.name)}`, {
+async function uploadOne(file, relPath) {
+  const params = new URLSearchParams({ name: file.name })
+  // 只有真的带目录信息时才传 path，单文件上传保持原来的请求形态
+  if (relPath && relPath.includes('/')) params.set('path', relPath)
+
+  const res = await fetch(`/api/v1/inbox?${params}`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/octet-stream' },
     body: file,
@@ -43,31 +107,100 @@ async function uploadOne(file) {
 }
 
 /**
+ * 递归读完一个目录条目。
+ *
+ * ★ `readEntries()` 每次只返回一批（Chrome 上限 100），必须循环到
+ * 返回空数组。只读一次会静默漏掉后面的文件。
+ *
+ * @param {object} entry - FileSystemDirectoryEntry
+ * @returns {Promise<object[]>} 条目数组
+ */
+async function readAllEntries(entry) {
+  const reader = entry.createReader()
+  const out = []
+  for (let round = 0; round < 200; round++) {
+    const batch = await new Promise((resolve, reject) => {
+      reader.readEntries((list) => resolve(list), (err) => reject(err))
+    })
+    if (!batch || batch.length === 0) break
+    out.push(...batch)
+  }
+  return out
+}
+
+/**
+ * 递归收集一个条目下的所有文件。
+ *
+ * @param {object} entry - FileSystemEntry
+ * @param {string} prefix - 当前相对路径前缀
+ * @param {Array<{file:File, relPath:string, reason?:string}>} out - 输出
+ * @returns {Promise<void>} 完成
+ */
+async function walkEntry(entry, prefix, out) {
+  if (!entry) return
+
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => {
+      entry.file((f) => resolve(f), (err) => reject(err))
+    })
+    out.push({ file, relPath: prefix ? `${prefix}/${file.name}` : file.name })
+    return
+  }
+
+  if (!entry.isDirectory) return
+  if (NOISE_DIRS.has(entry.name)) return
+
+  const children = await readAllEntries(entry)
+  const next = prefix ? `${prefix}/${entry.name}` : entry.name
+  for (const child of children) {
+    await walkEntry(child, next, out)
+  }
+}
+
+/**
+ * 从拖放事件里收集文件（支持文件夹）。
+ *
+ * @param {DataTransfer} dt - 拖放数据
+ * @returns {Promise<Array<{file:File, relPath:string}>>} 文件列表
+ */
+async function collectFromDataTransfer(dt) {
+  const items = dt.items ? [...dt.items].filter((i) => i.kind === 'file') : []
+  const entries = items
+    .map((i) => (typeof i.webkitGetAsEntry === 'function' ? i.webkitGetAsEntry() : null))
+    .filter(Boolean)
+
+  // 老浏览器没有 webkitGetAsEntry：退化成普通文件列表（文件夹会丢）
+  if (entries.length === 0) {
+    return [...(dt.files ?? [])].map((f) => ({ file: f, relPath: f.webkitRelativePath || f.name }))
+  }
+
+  const out = []
+  for (const entry of entries) {
+    await walkEntry(entry, '', out)
+  }
+  return out
+}
+
+/**
  * 挂载上传界面。
  *
- * @param {object} opts - { button, dropZone, banner, onChange }
- *   button   「上传」按钮
- *   dropZone 可拖拽区域（通常是右侧列表盒子）
- *   banner   结果显示区
- *   onChange  暂存区变化后的回调（重新拉清单）
+ * @param {object} opts - { button, folderButton, dropZone, banner, onChange }
+ *   button       「上传」按钮（选文件）
+ *   folderButton 「传文件夹」按钮（可选；没有就退化成只有拖拽支持文件夹）
+ *   dropZone     可拖拽区域（通常是右侧列表盒子）
+ *   banner       结果显示区
+ *   onChange     暂存区变化后的回调（重新拉清单）
  * @returns {object} 控制器
  */
 export function mountUpload(opts) {
-  const { button, dropZone, banner, onChange } = opts
+  const { button, folderButton, dropZone, banner, onChange } = opts
 
-  // 隐藏的文件选择器
-  //
-  // accept 只影响文件对话框的默认过滤，**真正的白名单在服务端**
-  // （_lib/file-types.mjs 的 EXT_ALIASES）。这里不追求列全 60 多种后缀，
-  // 但代码类必须带上 —— 否则在文件对话框里根本选不中 .ts/.py 这类文件，
+  // 允许的后缀。accept 只影响文件对话框的默认过滤，
+  // **真正的白名单在服务端**（_lib/file-types.mjs 的 EXT_ALIASES）。
+  // 代码类必须带上 —— 否则文件对话框里根本选不中 .ts/.py，
   // 用户会以为"不支持代码"。
-  const picker = document.createElement('input')
-  picker.type = 'file'
-  picker.multiple = true
-  picker.accept = [
-    // 文档
+  const ACCEPT = [
     '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt', '.md', '.markdown', '.txt', '.csv',
-    // 代码与配置
     '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
     '.py', '.java', '.kt', '.go', '.rs', '.c', '.h', '.cpp', '.hpp', '.cs', '.rb', '.php',
     '.swift', '.dart', '.lua', '.r', '.scala', '.groovy',
@@ -76,71 +209,216 @@ export function mountUpload(opts) {
     '.json', '.yaml', '.yml', '.toml', '.ini', '.xml', '.conf',
     '.proto', '.graphql', '.tex', '.diff', '.patch',
   ].join(',')
-  picker.style.display = 'none'
-  document.body.appendChild(picker)
+
+  /** 建一个隐藏的文件选择器。 */
+  const makePicker = () => {
+    const el = document.createElement('input')
+    el.type = 'file'
+    el.multiple = true
+    el.accept = ACCEPT
+    el.style.display = 'none'
+    document.body.appendChild(el)
+    return el
+  }
+
+  const picker = makePicker()
+
+  // 目录选择器：webkitdirectory 会让浏览器把整个目录递归列进 files，
+  // 每个 File 上带 webkitRelativePath（`合同/2025/xx.pdf`）
+  const dirPicker = makePicker()
+  dirPicker.removeAttribute('accept')
+  dirPicker.setAttribute('webkitdirectory', '')
+  dirPicker.setAttribute('directory', '')
+  dirPicker.webkitdirectory = true
 
   let busy = false
+  /** 取消标记（用户可以中途停下）。 */
+  let cancelled = false
 
   /**
-   * 处理一批文件。
-   * @param {FileList|File[]} files - 文件列表
+   * 把文件列表按「能传 / 不能传」分类。
+   * @param {Array<{file:File, relPath:string}>} items - 候选
+   * @returns {{ok:Array, unsupported:Array, oversize:Array, noise:Array}} 分类结果
    */
-  async function handleFiles(files) {
-    const list = [...files]
-    if (list.length === 0 || busy) return
+  const classify = (items) => {
+    const ok = []
+    const unsupported = []
+    const oversize = []
+    const noise = []
 
-    const oversize = list.filter((f) => f.size > MAX_BYTES)
-    const ok = list.filter((f) => f.size <= MAX_BYTES)
-
-    if (oversize.length) {
-      banner.innerHTML = `<div class="banner warn">
-        ${oversize.map((f) => esc(f.name)).join('、')} 超过 ${MAX_BYTES / 1024 / 1024}MB，
-        网页上传不支持这么大的文件。<br>
-        <span class="dim">请把文件放到本地目录后用命令行入库：
-        <code>node scripts/ingest.mjs "目录"</code>（那条路直写存储，没有体积限制）</span>
-      </div>`
+    const isSupported = (name) => {
+      const m = /\.([A-Za-z0-9]+)$/.exec(name)
+      if (!m) return false
+      return ACCEPT.split(',').includes(`.${m[1].toLowerCase()}`)
     }
 
-    if (ok.length === 0) return
+    for (const it of items) {
+      if (isNoiseFile(it.file.name) || it.relPath.split('/').some((p) => NOISE_DIRS.has(p))) {
+        noise.push(it)
+      } else if (!isSupported(it.file.name)) {
+        unsupported.push(it)
+      } else if (it.file.size > MAX_BYTES) {
+        oversize.push(it)
+      } else {
+        ok.push(it)
+      }
+    }
+    return { ok, unsupported, oversize, noise }
+  }
 
-    busy = true
-    button.disabled = true
-    const results = []
+  /**
+   * 处理一批文件（含整目录）。
+   *
+   * @param {Array<{file:File, relPath:string}>} items - 文件
+   * @param {string} [sourceLabel] - 来源说明（如「文件夹 合同/」）
+   * @returns {Promise<{uploaded:number, failed:number, skipped:object, cancelled:boolean}>} 结果摘要
+   */
+  async function handleFiles(items, sourceLabel = '') {
+    if (busy) {
+      banner.innerHTML = '<div class="banner warn">上一批还在上传，等它结束再试。</div>'
+      return { uploaded: 0, failed: 0, skipped: {}, cancelled: false, busy: true }
+    }
+    if (items.length === 0) return { uploaded: 0, failed: 0, skipped: {}, cancelled: false }
 
-    for (let i = 0; i < ok.length; i++) {
-      const f = ok[i]
-      banner.innerHTML = `<div class="banner info">正在上传 ${i + 1}/${ok.length}：
-        ${esc(f.name)}（${fmtSize(f.size)}）</div>`
-      try {
-        const rec = await uploadOne(f)
-        results.push({ file: f, rec, error: null })
-      } catch (err) {
-        results.push({ file: f, rec: null, error: String(err?.message ?? err) })
+    const { ok, unsupported, oversize, noise } = classify(items)
+
+    // 体积/数量上限：明确拒绝，而不是传到一半失败
+    let total = ok.reduce((a, it) => a + it.file.size, 0)
+    let queue = ok
+    let clipped = false
+    if (queue.length > MAX_FILES) {
+      queue = queue.slice(0, MAX_FILES)
+      clipped = true
+      total = queue.reduce((a, it) => a + it.file.size, 0)
+    }
+    if (total > MAX_TOTAL_BYTES) {
+      clipped = true
+    }
+
+    const skipLines = []
+    if (unsupported.length) {
+      const exts = [...new Set(unsupported.map((it) => {
+        const m = /\.([A-Za-z0-9]+)$/.exec(it.file.name)
+        return m ? `.${m[1].toLowerCase()}` : '(无扩展名)'
+      }))]
+      skipLines.push(`跳过 ${unsupported.length} 个不支持的类型（${exts.slice(0, 8).join(' ')}${exts.length > 8 ? ' …' : ''}）`)
+    }
+    if (oversize.length) {
+      skipLines.push(`跳过 ${oversize.length} 个超过 ${MAX_BYTES / 1024 / 1024}MB 的文件：${
+        oversize.slice(0, 5).map((it) => esc(it.file.name)).join('、')}${oversize.length > 5 ? ' …' : ''}`)
+    }
+    if (noise.length) {
+      skipLines.push(`跳过 ${noise.length} 个系统/临时文件（Thumbs.db、~$ 锁文件、node_modules 等）`)
+    }
+    if (clipped) {
+      skipLines.push(`本次最多处理 ${MAX_FILES} 个文件 / ${(MAX_TOTAL_BYTES / 1024 / 1024 / 1024).toFixed(0)}GB，其余请分批或改用命令行`)
+    }
+
+    if (queue.length === 0) {
+      banner.innerHTML = `<div class="banner warn">
+        <b>没有可上传的文件</b>${sourceLabel ? `（${esc(sourceLabel)}）` : ''}
+        ${skipLines.map((l) => `<br>· ${l}`).join('')}
+        <br><br><span class="dim">支持的格式见「上传」按钮的提示；
+        更大的文件或整批大量文件请用命令行：<code>node scripts/ingest.mjs "目录"</code>
+        （直写存储，没有体积与数量限制）</span>
+      </div>`
+      return {
+        uploaded: 0,
+        failed: 0,
+        cancelled: false,
+        skipped: {
+          unsupported: unsupported.length,
+          oversize: oversize.length,
+          noise: noise.length,
+          clipped,
+        },
       }
     }
 
+    busy = true
+    cancelled = false
+    button.disabled = true
+    if (folderButton) folderButton.disabled = true
+
+    const results = []
+    let done = 0
+
+    /**
+     * 刷新进度。
+     * @param {string} current - 当前文件名
+     */
+    const showProgress = (current) => {
+      const pct = Math.round((done / queue.length) * 100)
+      banner.innerHTML = `<div class="banner info">
+        <b>正在上传 ${done}/${queue.length}</b>
+        ${sourceLabel ? `<span class="dim">（${esc(sourceLabel)}）</span>` : ''}
+        <div class="up-progress"><i style="width:${pct}%"></i></div>
+        <span class="dim">${esc(current)}</span>
+        ${skipLines.length ? `<div class="dim" style="margin-top:4px">${skipLines.join('；')}</div>` : ''}
+        <div style="margin-top:6px"><button class="btn ghost" id="up-cancel">停止上传</button></div>
+      </div>`
+      document.getElementById('up-cancel')?.addEventListener('click', () => {
+        cancelled = true
+        banner.innerHTML = '<div class="banner warn">正在停止…（已上传的文件会保留在暂存区）</div>'
+      })
+    }
+
+    // 并发上传：慢的是网络往返，串行 100 个文件会让人一直干等
+    let cursor = 0
+    const worker = async () => {
+      for (;;) {
+        if (cancelled) return
+        const idx = cursor
+        cursor += 1
+        if (idx >= queue.length) return
+        const it = queue[idx]
+        try {
+          const rec = await uploadOne(it.file, it.relPath)
+          results.push({ item: it, rec, error: null })
+        } catch (err) {
+          results.push({ item: it, rec: null, error: String(err?.message ?? err) })
+        }
+        done += 1
+        showProgress(it.relPath)
+      }
+    }
+
+    showProgress(queue[0].relPath)
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker))
+
     busy = false
     button.disabled = false
+    if (folderButton) folderButton.disabled = false
 
-    const done = results.filter((r) => !r.error)
-    const dupInLib = done.filter((r) => r.rec.alreadyInLibrary)
-    const dupPending = done.filter((r) => r.rec.alreadyPending && !r.rec.alreadyInLibrary)
+    const failed = results.filter((r) => r.error)
+    const doneOk = results.filter((r) => !r.error)
+    const dupInLib = doneOk.filter((r) => r.rec.alreadyInLibrary)
+    const dupPending = doneOk.filter((r) => r.rec.alreadyPending && !r.rec.alreadyInLibrary)
 
-    banner.innerHTML = `<div class="banner ${results.some((r) => r.error) ? 'warn' : 'info'}">
-      <b>已上传 ${done.length} / ${ok.length} 个文件</b>
-      ${results.filter((r) => r.error).map((r) =>
-        `<br>✗ ${esc(r.file.name)}：${esc(r.error)}`).join('')}
+    // 暂存区在哪，取决于你是从本地 dev-server 还是线上站点上传的
+    const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname)
+    const staging = isLocal
+      ? '本地暂存区</b>（.local-data/doc-inbox/）'
+      : '线上暂存区</b>（Netlify Blobs）'
+    const stagingHint = isLocal
+      ? '本地暂存区直接读得到，不需要额外配置。'
+      : '需要在项目根目录的 <code>.env</code> 里配好 <code>DOCS_STORE_MODE=remote</code>、<code>SITE_ID</code> 与 <code>NETLIFY_ACCESS_TOKEN</code>。'
+
+    banner.innerHTML = `<div class="banner ${failed.length || cancelled ? 'warn' : 'info'}">
+      <b>已上传 ${doneOk.length} / ${queue.length} 个文件</b>
+      ${cancelled ? '<br>· 已按你的要求停止，剩余文件没有上传' : ''}
+      ${skipLines.map((l) => `<br>· ${l}`).join('')}
+      ${failed.slice(0, 8).map((r) => `<br>✗ ${esc(r.item.relPath)}：${esc(r.error)}`).join('')}
+      ${failed.length > 8 ? `<br>✗ 另有 ${failed.length - 8} 个失败` : ''}
       ${dupInLib.length ? `<br>· ${dupInLib.length} 个库里已有同样内容，入库时会自动去重` : ''}
       ${dupPending.length ? `<br>· ${dupPending.length} 个暂存区已有同样内容` : ''}
       <br><br>
-      <b>下一步</b>：文件已存进<b>线上暂存区</b>（Netlify Blobs），尚未入库。
+      <b>下一步</b>：文件已存进${staging}，尚未入库。
       在本地运行：<br>
       <code>node scripts/process-pending.mjs</code>
       <br><span class="dim">
-        需要先在项目根目录的 <code>.env</code> 里配好
-        <code>SITE_ID</code> 与 <code>NETLIFY_ACCESS_TOKEN</code>，
-        本地脚本才连得上线上暂存区（否则它只看本地目录，会显示为空）。<br>
-        重活 —— 抽正文、Office 转 PDF、分类打标 —— 必须在本地跑，
+        ${stagingHint}
+        <br>重活 —— 抽正文、Office 转 PDF、分类打标 —— 必须在本地跑，
         线上函数没有 LibreOffice，也扛不住大文件。
       </span>
       <br><br><button class="btn ghost" id="up-dismiss">知道了</button>
@@ -151,26 +429,84 @@ export function mountUpload(opts) {
     })
 
     onChange?.()
+
+    return {
+      uploaded: doneOk.length,
+      failed: failed.length,
+      cancelled,
+      skipped: {
+        unsupported: unsupported.length,
+        oversize: oversize.length,
+        noise: noise.length,
+        clipped,
+      },
+    }
   }
 
+  /**
+   * 处理一次拖放（含文件夹递归）。
+   *
+   * 单独暴露出来，一是让 drop 监听器保持一行，二是测试可以直接
+   * await 它拿到结果 —— 目录递归那 250 个条目到底收全没有，
+   * 只有这样才能断言。
+   *
+   * @param {DataTransfer} dt - 拖放数据
+   * @returns {Promise<object>} 结果摘要
+   */
+  async function handleDataTransfer(dt) {
+    const items = await collectFromDataTransfer(dt).catch(() => [])
+    if (items.length === 0) {
+      banner.innerHTML = '<div class="banner warn">没有读到任何文件。若拖的是文件夹，请用「传文件夹」按钮选择。</div>'
+      return { uploaded: 0, failed: 0, cancelled: false, skipped: {}, empty: true }
+    }
+    const roots = [...new Set(items.map((it) => it.relPath.split('/')[0]))]
+    const label = roots.length === 1 && items.some((it) => it.relPath.includes('/'))
+      ? `文件夹 ${roots[0]}/`
+      : ''
+    return handleFiles(items, label)
+  }
+
+  // ---- 选文件 ----
   button.addEventListener('click', () => picker.click())
   picker.addEventListener('change', () => {
-    handleFiles(picker.files)
+    handleFiles([...picker.files].map((f) => ({
+      file: f,
+      relPath: f.webkitRelativePath || f.name,
+    })))
     picker.value = ''   // 允许再次选同一文件
   })
 
-  // ---- 拖拽 ----
+  // ---- 选文件夹 ----
+  if (folderButton) {
+    folderButton.addEventListener('click', () => dirPicker.click())
+    dirPicker.addEventListener('change', () => {
+      const files = [...dirPicker.files]
+      const rootDir = files[0]?.webkitRelativePath?.split('/')[0] ?? '文件夹'
+      handleFiles(
+        files.map((f) => ({ file: f, relPath: f.webkitRelativePath || f.name })),
+        `文件夹 ${rootDir}/`,
+      )
+      dirPicker.value = ''
+    })
+  }
+
+  // ---- 拖拽（支持文件夹）----
   let depth = 0
   const showDrop = (on) => dropZone.classList.toggle('dropping', on)
 
+  const hasFiles = (e) => {
+    const types = e.dataTransfer?.types ?? []
+    return types.includes('Files')
+  }
+
   dropZone.addEventListener('dragenter', (e) => {
-    if (!e.dataTransfer?.types?.includes('Files')) return
+    if (!hasFiles(e)) return
     e.preventDefault()
     depth += 1
     showDrop(true)
   })
   dropZone.addEventListener('dragover', (e) => {
-    if (!e.dataTransfer?.types?.includes('Files')) return
+    if (!hasFiles(e)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
   })
@@ -179,14 +515,15 @@ export function mountUpload(opts) {
     if (depth === 0) showDrop(false)
   })
   dropZone.addEventListener('drop', (e) => {
-    if (!e.dataTransfer?.files?.length) return
+    if (!hasFiles(e)) return
     e.preventDefault()
     depth = 0
     showDrop(false)
-    handleFiles(e.dataTransfer.files)
+    // ★ 文件夹的 drop 里 dataTransfer.files 往往是空的，必须走 items + 递归
+    handleDataTransfer(e.dataTransfer)
   })
 
-  return { picker }
+  return { picker, dirPicker, handleFiles, handleDataTransfer }
 }
 
 /**
@@ -221,7 +558,10 @@ export async function renderPending(container, opts = {}) {
           ${typeBadge(it.type, it.ext)}
           <div class="pending-main">
             <div class="pending-title">${esc(it.title)}</div>
-            <div class="pending-meta">${fmtSize(it.size)}<i>·</i>${fmtDate(it.uploadedAt)}</div>
+            <div class="pending-meta">
+              ${it.relativePath ? `<span class="pending-path" title="${esc(it.relativePath)}">${esc(it.relativePath)}</span><i>·</i>` : ''}
+              ${fmtSize(it.size)}<i>·</i>${fmtDate(it.uploadedAt)}
+            </div>
           </div>
           <button class="pending-del" data-del="${esc(it.id)}" title="从暂存区移除">移除</button>
         </div>`).join('')}

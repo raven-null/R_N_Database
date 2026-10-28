@@ -279,10 +279,12 @@ async function checkList(client) {
   if (r.listHeadPosition !== 'sticky') issues.push('统计行应当贴顶吸附')
 
   // ---- 独立滚动：滚右边，左边不该跟着动 ----
-  // ★ 只有内容真的超出可视高度时才谈得上「能滚」。
-  // 库里只有几份文档时右侧本来就不溢出，此时把 scrollTop 设成 600 也只会是 0
-  // —— 那是内容太少，不是布局坏了。
+  // ★ 只有内容真的超出可视高度时才谈得上「能滚」，而且**能滚的距离**
+  // 取决于内容多少（几份文档时可能只有几十像素）。所以断言"滚到了
+  // 它能滚到的位置"，而不是写死 600。
   const mainOverflows = (r.mainScrollH ?? 0) > (r.mainClientH ?? 0)
+  const maxScroll = Math.max(0, (r.mainScrollH ?? 0) - (r.mainClientH ?? 0))
+  const want = Math.min(600, maxScroll)
 
   await evaluate(client, `document.querySelector('.main').scrollTop = 600`)
   await new Promise((res) => setTimeout(res, 250))
@@ -291,10 +293,12 @@ async function checkList(client) {
     sideTop: document.querySelector('.sidebar').scrollTop,
     docTop: document.scrollingElement.scrollTop,
   })`)
-  line('滚右边 600px 后', `右 ${after.mainTop}　左 ${after.sideTop}　整页 ${after.docTop}`)
+  line('滚右边 600px 后', `右 ${after.mainTop}（最多可滚 ${maxScroll}）　左 ${after.sideTop}　整页 ${after.docTop}`)
 
   if (mainOverflows) {
-    if (after.mainTop < 500) issues.push('右侧盒子没有真的滚动')
+    if (Math.abs(after.mainTop - want) > 2) {
+      issues.push(`右侧盒子滚到了 ${after.mainTop}，但最多应能滚到 ${want}`)
+    }
   } else {
     line('滚动独立性验证', '内容未超屏，无法触发滚动（不是缺陷）；仍检查整页是否被带动')
   }
@@ -624,6 +628,8 @@ async function checkTools(client) {
     }
     return {
       hasUpload: !!document.getElementById('btn-upload'),
+      hasUploadDir: !!document.getElementById('btn-upload-dir'),
+      uploadDirBox: box('#btn-upload-dir'),
       hasSelect: !!document.getElementById('btn-select'),
       hasTagAdmin: !!document.getElementById('btn-tags'),
       uploadBox: box('#btn-upload'),
@@ -637,6 +643,7 @@ async function checkTools(client) {
 
   const r = await evaluate(client, probe)
   line('上传按钮', r.hasUpload ? `${r.uploadBox?.w}×${r.uploadBox?.h}` : '缺失')
+  line('传文件夹按钮', r.hasUploadDir ? `${r.uploadDirBox?.w}×${r.uploadDirBox?.h}` : '缺失')
   line('选择按钮', r.hasSelect ? '有' : '缺失')
   line('标签管理入口', r.hasTagAdmin ? '有' : '缺失')
   line('卡片可点区域', `${r.docLinkCount} 个 .doc-link / ${r.docCount} 张卡片`)
@@ -644,6 +651,8 @@ async function checkTools(client) {
   line('批量操作栏', r.selbarHidden ? '默认隐藏 ✓' : '★ 默认显示了')
 
   if (!r.hasUpload) issues.push('缺少上传按钮')
+  if (!r.hasUploadDir) issues.push('缺少「传文件夹」按钮')
+  if (r.uploadDirBox && r.uploadDirBox.h < 24) issues.push('「传文件夹」按钮高度塌陷')
   if (!r.hasSelect) issues.push('缺少选择按钮')
   if (!r.hasTagAdmin) issues.push('缺少标签管理入口')
   if (r.docCount > 0 && r.docLinkCount !== r.docCount) {

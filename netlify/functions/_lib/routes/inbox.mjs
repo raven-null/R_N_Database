@@ -40,6 +40,50 @@ const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 /** 待处理清单最多返回多少条。 */
 const LIST_LIMIT = 300
 
+/** 相对路径（整目录上传时保留目录结构）的长度与层数上限。 */
+const MAX_PATH_LEN = 400
+const MAX_PATH_DEPTH = 12
+
+/**
+ * 规整客户端传来的相对路径。
+ *
+ * 整个文件夹上传时，浏览器会给每个文件一个 `webkitRelativePath`
+ * （形如 `合同/2025/xx.pdf`）。保留这层信息有两个用处：
+ *   1. 暂存区里能看清这份文件原本在哪个目录（同名文件不再混淆）
+ *   2. 入库时写进 `sourcePath`，日后能追溯来源
+ *
+ * 但它是**客户端提供的字符串**，必须当作不可信输入：
+ * 去掉 `\`、`.`, 拒绝 `..`（防路径穿越），限制长度与层数。
+ * 任何不合规的段直接丢弃该文件而不是默默改写路径 —— 改写会让人
+ * 以为传的是 A 目录，实际进库记成了 B。
+ *
+ * @param {string} raw - 原始相对路径
+ * @returns {string|null} 规整后的路径；非法时返回 null
+ */
+function normalizeRelPath(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s) return ''
+
+  let decoded
+  try {
+    decoded = decodeURIComponent(s)
+  } catch {
+    return null   // 非法百分号编码
+  }
+
+  if (decoded.length > MAX_PATH_LEN) return null
+  if (decoded.includes('\0')) return null
+
+  const parts = decoded.replace(/\\/g, '/').split('/').filter((p) => p && p !== '.')
+  if (parts.length > MAX_PATH_DEPTH) return null
+  // `..` 一律拒绝：宁可报错，也不要把用户的文件记到一个越界的路径上
+  if (parts.some((p) => p === '..')) return null
+  // 去掉控制字符（换行、制表符在路径里只会是脏数据）
+  if (parts.some((p) => /[\u0000-\u001F\u007F]/.test(p))) return null
+
+  return parts.join('/')
+}
+
 /**
  * 鉴权：上传是写操作，要求 admin。
  * @param {Request} req - 请求
@@ -116,7 +160,12 @@ async function receiveUpload(req, url) {
   const rawName = url.searchParams.get('name')
     ?? req.headers.get('x-file-name')
     ?? ''
-  const name = decodeURIComponent(String(rawName)).trim()
+  const decodedName = decodeURIComponent(String(rawName)).trim()
+
+  // ★ 只取最后一段。浏览器总是只发文件名，但这是个**不可信输入**：
+  // 允许 `..` 或分隔符进来，它会一路流到 originalName、下载文件名
+  // 与本地临时文件路径上。取末段最省事也最安全。
+  const name = decodedName.split(/[\\/]/).pop().trim()
 
   if (!name) {
     return badRequest('缺少文件名（?name= 或 X-File-Name 请求头）', { req })
@@ -127,6 +176,19 @@ async function receiveUpload(req, url) {
   if (!type) {
     return badRequest(`不支持的类型：${name.split('.').pop() || '(无扩展名)'}。`
       + `支持 ${SUPPORTED_EXTENSIONS.join(' / ')}`, { req })
+  }
+
+  // 整目录上传时带上相对路径（`合同/2025/xx.pdf`）。可选：单文件上传没有。
+  const pathRaw = url.searchParams.get('path')
+  const relPath = normalizeRelPath(pathRaw)
+  if (relPath === null) {
+    return badRequest(`相对路径不合法：${String(pathRaw).slice(0, 80)}`, { req })
+  }
+  if (relPath && !relPath.endsWith(name)) {
+    return badRequest(
+      `相对路径与文件名对不上（路径「${relPath}」，文件名「${name}」）`,
+      { req },
+    )
   }
 
   // 体积预检：能拿到 content-length 就先拦，省得把整个 body 读进内存
@@ -169,6 +231,8 @@ async function receiveUpload(req, url) {
   const record = {
     id,
     originalName: name,
+    // 目录结构（整目录上传才有）；单文件上传时不存在
+    relativePath: relPath && relPath !== name ? relPath : undefined,
     title: titleFromFilename(name),
     type,
     ext,

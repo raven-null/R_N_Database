@@ -34,6 +34,7 @@
     "test:edit": "node scripts/test-content-edit.mjs",
     "test:index": "node scripts/test-index-delta.mjs",
     "test:office": "node scripts/test-office-views.mjs",
+    "test:upload": "node scripts/test-folder-upload.mjs",
     "process-pending": "node scripts/process-pending.mjs",
     "test:batch": "node scripts/test-batch-tags.mjs",
     "test:access": "node scripts/test-access.mjs"

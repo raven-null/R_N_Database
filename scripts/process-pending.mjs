@@ -182,14 +182,17 @@ async function main() {
       const tmpFile = join(tmp, rec.originalName.replace(/[\\/:*?"<>|]/g, '_'))
       try {
         writeFileSync(tmpFile, buf)
-        // 复用命令行入库的同一套流水线；override 把真实文件名与来源还原回去
+        // 复用命令行入库的同一套流水线；override 把真实文件名与来源还原回去。
+        // 整目录上传时 relativePath 带着目录结构（`合同/2025/xx.pdf`），
+        // 一并写进 sourcePath —— 日后能看出这份文件原本在哪
+        const provenance = rec.relativePath || rec.originalName
         const result = await ingestOne(tmpFile, ctx, {
           originalName: rec.originalName,
-          sourcePath: `upload://${rec.originalName}`,
+          sourcePath: `upload://${provenance}`,
         })
 
         const tags = (result.tags ?? []).slice(0, 4).join(',')
-        console.log(`  ${label} ✓ ${short}`)
+        console.log(`  ${label} ✓ ${rec.relativePath || short}`)
         console.log(`          → ${result.title}`)
         console.log(`            分类 ${(result.categories ?? []).join('/')} | 标签 ${tags || '无'}`
           + ` | 正文 ${result.textChars} 字 | 预览 ${result.previewKind}`)

@@ -53,6 +53,7 @@ const el = {
   selbar: document.getElementById('selbar'),
   btnSelect: document.getElementById('btn-select'),
   btnUpload: document.getElementById('btn-upload'),
+  btnUploadDir: document.getElementById('btn-upload-dir'),
 }
 
 /* ============================================================
@@ -489,6 +490,7 @@ async function main() {
   if (canWrite) {
     mountUpload({
       button: el.btnUpload,
+      folderButton: el.btnUploadDir,
       dropZone: el.results.closest('.main') ?? el.results,
       banner: el.banner,
       onChange: () => renderPendingList(),
@@ -499,6 +501,9 @@ async function main() {
       if (confirm('上传需要登录。现在去登录？')) showLoginDialog()
     })
     el.btnUpload.title = '上传需要登录'
+    if (el.btnUploadDir) {
+      el.btnUploadDir.hidden = true   // 未登录时不必留一个点了也没用的按钮
+    }
   }
 
   try {

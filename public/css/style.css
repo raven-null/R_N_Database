@@ -793,6 +793,13 @@ iframe {
 }
 .pending-meta { font-size: 11.5px; color: var(--dim); }
 .pending-meta i { font-style: normal; opacity: .5; margin: 0 4px; }
+/* 整目录上传时显示原目录（同名文件靠它区分） */
+.pending-path {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  opacity: .85;
+  word-break: break-all;
+}
 .pending-del {
   border: 0;
   background: transparent;
@@ -803,6 +810,22 @@ iframe {
 }
 .pending-note { font-size: 12.5px; color: var(--dim); padding: 6px 0; }
 .pending-note.err { color: var(--bad); }
+
+/* ---- 上传进度条（整目录上传时才用得上）---- */
+.up-progress {
+  height: 6px;
+  margin: 8px 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  overflow: hidden;
+}
+.up-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width .2s ease;
+}
 
 /* ---- 多选 ---- */
 .doc-check {
