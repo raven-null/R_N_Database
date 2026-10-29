@@ -219,10 +219,47 @@ export async function getDocsStore(name) {
 
   try {
     const s = getStore(options)
-    s.mode = 'remote'
-    return s
+    return strongReads(s)
   } catch (err) {
     throw storeFailure('Netlify Blobs 不可用', err, rt)
+  }
+}
+
+/**
+ * 把 Blobs 句柄包成「读一律强一致」。
+ *
+ * ## 为什么必须这样
+ *
+ * Netlify Blobs 的读默认走边缘缓存、**最终一致**：刚写进去的 key 换个
+ * 请求去读可能是空的（实测线上滞后数秒）。这个项目里有好几处是
+ * 「写一次、紧接着读回来」的流程，最终一致会把它们逐个咬穿：
+ *
+ *   · 分片上传：第 1 片写了 chunk-meta，第 2 片读不到 → 当成新任务 →
+ *     报「缺少文件名」（>4MB 的文件线上必挂）
+ *   · 入库时 applyDocChange 读 index-meta / 分片 / docs 清单再写回 ——
+ *     读不到就当成空索引，写回时把别人的改动覆盖掉（并发删除丢更新）
+ *   · 删完文档刷新列表还在，过几秒才消失
+ *
+ * 强一致读绕过边缘缓存，代价是每次都回源。个人资料库这点延迟无所谓，
+ * 换来的是「写完了就一定读得到」这个可以依赖的语义。
+ *
+ * 写入侧没有 consistency 选项，只能靠读侧补偿；真正需要跨请求原子的
+ * 场景（比如批量打标签）由 applyDocChangesBulk 合并成一次读写来解决。
+ *
+ * @param {object} raw - @netlify/blobs 的 Store
+ * @returns {object} 包装后的 store（mode 标 remote）
+ */
+function strongReads(raw) {
+  const STRONG = { consistency: 'strong' }
+  return {
+    mode: 'remote',
+    get: (key, opts = {}) => raw.get(key, { ...STRONG, ...opts }),
+    getWithMetadata: (key, opts = {}) => raw.getWithMetadata(key, { ...STRONG, ...opts }),
+    list: (opts = {}) => raw.list({ ...STRONG, ...opts }),
+    getMetadata: (key, opts = {}) => raw.getMetadata(key, { ...STRONG, ...opts }),
+    set: (key, value, opts) => raw.set(key, value, opts),
+    setJSON: (key, value, opts) => raw.setJSON(key, value, opts),
+    delete: (key) => raw.delete(key),
   }
 }
 
