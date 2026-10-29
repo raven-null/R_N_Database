@@ -196,14 +196,19 @@ async function openListPage() {
 }
 
 async function testUi() {
-  console.log('\n【界面：侧栏来源目录树】')
+  console.log('\n【界面：侧栏目录树】')
 
   const { dom, window, errors } = await openListPage()
   const d = window.document
 
+  // 这一块从「来源目录」升级成了「目录」（文件夹是真正的树了），
+  // 断言按新标题找分区；找不到就说明侧栏结构被打断了
   const section = [...d.querySelectorAll('.facet')]
-    .find((s) => s.querySelector('h3')?.textContent.includes('来源目录'))
-  check(Boolean(section), '侧栏有「来源目录」分区')
+    .find((s) => {
+      const t = s.querySelector('h3')?.textContent ?? ''
+      return t.includes('目录')
+    })
+  check(Boolean(section), '侧栏有「目录」分区')
 
   const rows = section?.querySelectorAll('.dir-row') ?? []
   check(rows.length > 0, `目录树有 ${rows.length} 行`)
@@ -214,6 +219,10 @@ async function testUi() {
   // 顶层默认展开：应当能直接看到盘符或「上传」
   const hasTop = names.some((n) => /^[A-Z]:/.test(n) || n.startsWith('上传'))
   check(hasTop, '顶层节点可见（盘符 / 上传）')
+
+  // 新建文件夹的入口必须在（自己建文件夹是从这一版起的能力）
+  const newBtn = section?.querySelector('[data-folder-act="new"]')
+  check(Boolean(newBtn), '侧栏有「新建文件夹」入口')
 
   // 点一个目录 → 列表被筛选，且选中的行高亮
   const target = [...(section?.querySelectorAll('.dir-name') ?? [])]

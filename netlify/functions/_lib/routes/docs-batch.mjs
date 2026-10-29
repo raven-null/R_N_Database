@@ -21,6 +21,7 @@ import { ok, badRequest, notFound, unauthorized, forbidden, serverError } from '
 import { readAllMeta, readMeta, readDocText, readTaxonomy } from '../repo.mjs'
 import { getDocsStore, STORES } from '../store.mjs'
 import { applyDocChangesBulk } from '../index-store.mjs'
+import { loadFolders } from '../folders.mjs'
 
 /** 单次批量操作的文档数上限，防止一次改爆。 */
 const MAX_BATCH = 500
@@ -205,9 +206,20 @@ export async function batchRoute(req, url) {
           return badRequest('visibility 只能是 public 或 private', { req })
         }
         next = patchMeta(oldMeta, { visibility: v }, 'batch')
+      } else if (op === 'moveToFolder') {
+        // 把文档挪进虚拟文件夹。`folderId: null` = 移到根目录。
+        // folderId 不参与倒排索引，所以这一步只改元数据。
+        const fid = body?.folderId === null || body?.folderId === ''
+          ? null
+          : String(body?.folderId ?? '')
+        if (fid) {
+          const idx = await loadFolders()
+          if (!idx.get(fid)) return badRequest('目标文件夹不存在', { req })
+        }
+        next = patchMeta(oldMeta, { folderId: fid }, 'batch')
       } else {
         return badRequest(`未知操作：${op}`
-          + '（支持 addTags / removeTags / setCategory / setVisibility / markReview / delete）', { req })
+          + '（支持 addTags / removeTags / setCategory / setVisibility / moveToFolder / markReview / delete）', { req })
       }
 
       updates.push({ oldMeta, newMeta: next })

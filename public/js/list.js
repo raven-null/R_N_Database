@@ -153,6 +153,36 @@ function buildDirTree(docs) {
 }
 
 /**
+ * 把「空文件夹」并入目录树。
+ *
+ * 目录树平时是从文档的 `dir` 累加出来的 —— 没有文档的文件夹自然画不出来，
+ * 而"自己建的文件夹"一开始正是空的。所以服务端下发 `manifest.folders`
+ * 里的空节点在这里补进来（docCount === 0 的那些，其余已经有文档撑着）。
+ *
+ * @param {Map} nodes - buildDirTree 的结果（会被就地补充）
+ * @param {Array<{path:string, totalDocCount:number}>} folders - 服务端文件夹列表
+ * @returns {void}
+ */
+function mergeEmptyFolders(nodes, folders) {
+  for (const f of folders ?? []) {
+    const path = String(f.path ?? '')
+    if (!path || (f.totalDocCount ?? 0) > 0) continue
+    if (nodes.has(path)) continue
+
+    const parts = path.split('/')
+    let acc = ''
+    for (const p of parts) {
+      const full = acc ? `${acc}/${p}` : p
+      if (!nodes.has(full)) {
+        nodes.set(full, { count: 0, children: new Set(), label: p })
+      }
+      if (acc) nodes.get(acc).children.add(full)
+      acc = full
+    }
+  }
+}
+
+/**
  * 渲染目录树（只画选中路径的祖先链 + 手动展开的节点）。
  *
  * 不做"无限展开"：一个大目录展开几十层会把侧栏撑爆。
@@ -237,14 +267,19 @@ function renderFacets(docs) {
 
   const reviewCount = docs.filter((d) => d.needsReview).length
 
-  // ---- 来源目录：库是扁平的，这一块把 sourcePath 里的目录层级显出来 ----
+  // ---- 目录：文件夹树（服务端下发）+ 由文档归拢出来的节点 ----
+  // 两个来源都并入同一棵树：
+  //   · 有文档的节点从 docs 的 dir 累加（老数据、尚未落位的文档也画得出来）
+  //   · 空文件夹只能从 manifest.folders 来（自己建的文件夹一开始就没有文档）
   const dirTree = buildDirTree(docs)
+  mergeEmptyFolders(dirTree, state.manifest?.folders ?? [])
   const dirHtml = renderDirTree(dirTree, state.dir, expandedDirs)
 
   el.facets.innerHTML = `
     <section class="facet">
-      <h3>来源目录
-        <button class="tip" type="button" data-tip="文档原本所在的文件夹（来自入库时的来源路径）。点目录筛选，父目录包含子目录。网页上传的文件归在「上传」下，本机命令入库的按盘符显示。">?</button>
+      <h3>目录
+        <button class="tip" type="button" data-tip="文件夹是一棵真正的树：可以新建、双击改名、把选中的文档移进来。点一层筛选，父层包含子层。网页上传的文件归在「上传」下。">?</button>
+        <button class="facet-act" data-folder-act="new" title="新建文件夹">＋</button>
         ${state.dir ? `<button class="facet-act" data-facet="dir" data-value="">清除</button>` : ''}
       </h3>
       <div class="dir-tree">${dirHtml}</div>
@@ -324,6 +359,82 @@ function renderFacets(docs) {
       render()
     })
   })
+
+  // ---- 文件夹：新建 / 双击改名 ----
+  el.facets.querySelectorAll('[data-folder-act="new"]').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      createFolderUnder(state.dir)
+    })
+  })
+  el.facets.querySelectorAll('.dir-name').forEach((btn) => {
+    // 单击是筛选（已有 data-facet 处理），双击改名 —— 用 dblclick 不会互相干扰
+    btn.addEventListener('dblclick', (ev) => {
+      ev.preventDefault()
+      ev.stopPropagation()
+      renameFolder(btn.dataset.value)
+    })
+  })
+}
+
+/**
+ * 在某个目录下新建文件夹（空路径 = 根目录）。
+ *
+ * 服务端负责去重与非法名拦截，这里只负责把"当前选中哪一层"翻译成 parentFid。
+ *
+ * @param {string} parentPath - 当前选中的目录路径
+ * @returns {Promise<void>} 完成
+ */
+async function createFolderUnder(parentPath) {
+  const name = prompt('新建文件夹（层：' + (parentPath || '根目录') + '）', '')
+  if (name === null) return
+  const trimmed = String(name).trim()
+  if (!trimmed) return
+
+  const parent = (state.manifest?.folders ?? []).find((f) => f.path === parentPath)
+  try {
+    await apiFetch('/api/v1/folders', {
+      method: 'POST',
+      body: { name: trimmed, parentFid: parent?.fid ?? null },
+    })
+    if (parentPath) expandedDirs.add(parentPath)
+    await refreshManifest()
+  } catch (err) {
+    alert(`新建失败：${err.message}`)
+  }
+}
+
+/**
+ * 重命名目录树里的某一层。
+ *
+ * 注意：路径以「盘符:」或「上传」开头的老数据是没有对应文件夹节点的，
+ * 它们改名无从改起 —— 明确告诉用户，而不是静默失败。
+ *
+ * @param {string} path - 目录路径
+ * @returns {Promise<void>} 完成
+ */
+async function renameFolder(path) {
+  const folder = (state.manifest?.folders ?? []).find((f) => f.path === path)
+  if (!folder) {
+    alert('这一层的名字来自文档的来源路径，还不能改名。\n可以把里面的文档移到你自己建的文件夹里。')
+    return
+  }
+  const name = prompt('重命名文件夹', folder.name)
+  if (name === null) return
+  const trimmed = String(name).trim()
+  if (!trimmed || trimmed === folder.name) return
+
+  try {
+    await apiFetch(`/api/v1/folders/${encodeURIComponent(folder.fid)}`, {
+      method: 'PATCH',
+      body: { name: trimmed },
+    })
+    // 路径变了，选中项跟着改，否则筛选会落空
+    if (state.dir === path) state.dir = ''
+    await refreshManifest()
+  } catch (err) {
+    alert(`改名失败：${err.message}`)
+  }
 }
 
 /**
@@ -450,10 +561,13 @@ function bindCards(docs) {
  * 重新拉清单并重画（元数据被改过之后）。
  *
  * 不整页刷新：批量打标签后连着改几轮都不该丢滚动位置与筛选条件。
+ * ★ 必须先清缓存 —— 否则拿到的还是旧清单，"改了没反应"。
+ *
  * @returns {Promise<void>} 完成
  */
 async function refreshManifest() {
   try {
+    clearManifestCache()
     state.manifest = await loadManifest({ force: true })
   } catch {
     return

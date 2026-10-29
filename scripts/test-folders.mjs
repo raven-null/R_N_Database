@@ -214,6 +214,38 @@ async function main() {
     const self = await admin(`/api/v1/folders/${fid}`, { method: 'PATCH', body: { parentFid: fid } })
     check(self.status === 400, `不能移到自己里面（HTTP ${self.status}）`)
 
+    /* ---------- 把文档移进文件夹 ---------- */
+    console.log('\n【文档移到文件夹】')
+    const moved2 = await admin('/api/v1/docs/batch', {
+      method: 'POST',
+      body: { op: 'moveToFolder', ids: [docId], folderId: subFid },
+    })
+    check(moved2.status === 200, `moveToFolder 成功（HTTP ${moved2.status}）`)
+    const dAfterMove = await admin(`/api/v1/docs/${docId}`)
+    check(dAfterMove.body?.data?.folderId === subFid,
+      `文档的 folderId 已更新（${dAfterMove.body?.data?.folderId}）`)
+    const itemsAfterMove = (await admin('/api/v1/docs?limit=200')).body?.data?.items ?? []
+    check(itemsAfterMove.find((d) => d.id === docId)?.dir === `${MARK} 证件/2025`,
+      `目录跟着变（${itemsAfterMove.find((d) => d.id === docId)?.dir}）`)
+
+    const badMove = await admin('/api/v1/docs/batch', {
+      method: 'POST',
+      body: { op: 'moveToFolder', ids: [docId], folderId: 'nope-no-such-fid' },
+    })
+    check(badMove.status === 400, `移到不存在的文件夹被拒（HTTP ${badMove.status}）`)
+
+    // 移回根（folderId: null）→ dir 回落到来源路径；再放回叶子，后面的继承测试要用
+    await admin('/api/v1/docs/batch', {
+      method: 'POST',
+      body: { op: 'moveToFolder', ids: [docId], folderId: null },
+    })
+    const dRoot = await admin(`/api/v1/docs/${docId}`)
+    check(dRoot.body?.data?.folderId === null, 'folderId 清空后回到根目录')
+    await admin('/api/v1/docs/batch', {
+      method: 'POST',
+      body: { op: 'moveToFolder', ids: [docId, docId2], folderId: leaf.fid },
+    })
+
     /* ---------- 可见性继承 ---------- */
     console.log('\n【可见性继承】')
     const docMeta = await admin(`/api/v1/docs/${docId}`)

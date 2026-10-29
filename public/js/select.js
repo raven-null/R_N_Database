@@ -116,6 +116,7 @@ export function mountSelect(opts) {
           <button class="btn" data-op="add" ${n ? '' : 'disabled'}>加标签</button>
           <button class="btn" data-op="remove" ${n ? '' : 'disabled'}>删标签</button>
           <button class="btn" data-op="category" ${n ? '' : 'disabled'}>改分类</button>
+          <button class="btn" data-op="move" ${n ? '' : 'disabled'}>移到文件夹</button>
           <button class="btn ghost" data-op="review" ${n ? '' : 'disabled'}>标为待复查</button>
           <button class="btn danger" data-op="delete" ${n ? '' : 'disabled'}>删除</button>
         </div>
@@ -165,6 +166,18 @@ export function mountSelect(opts) {
           <button class="btn ghost" id="selbar-cancel">取消</button>
           <button class="tip" type="button" data-tip="会把选中文档的分类整体替换为所选分类。">?</button>
         </div>`
+    } else if (mode === 'move') {
+      // 文件夹清单是异步来的，先给骨架再填充
+      panel.innerHTML = `
+        <div class="selbar-row">
+          <select id="selbar-folder" aria-label="目标文件夹" disabled>
+            <option>读取文件夹…</option>
+          </select>
+          <button class="btn primary" id="selbar-go" disabled>移到该文件夹</button>
+          <button class="btn ghost" id="selbar-cancel">取消</button>
+          <button class="tip" type="button" data-tip="把选中文档挪进某个文件夹（不移动任何文件，只改归属）。选「根目录」= 从文件夹里挪出来。文件夹可以整层设为私有，里面的文档会跟着对访客隐藏。">?</button>
+        </div>`
+      fillFolderOptions(panel)
     }
 
     panel.querySelector('#selbar-cancel')?.addEventListener('click', () => {
@@ -176,6 +189,12 @@ export function mountSelect(opts) {
       if (mode === 'category') {
         const cat = panel.querySelector('#selbar-cat')?.value ?? ''
         await runBatch('setCategory', { categories: [cat] })
+        return
+      }
+      if (mode === 'move') {
+        const val = panel.querySelector('#selbar-folder')?.value ?? ''
+        // 空串 = 根目录（从文件夹里挪出来）
+        await runBatch('moveToFolder', { folderId: val || null })
         return
       }
       const tags = String(panel.querySelector('#selbar-tags')?.value ?? '')
@@ -220,6 +239,32 @@ export function mountSelect(opts) {
       if (goBtn) { goBtn.disabled = false; goBtn.textContent = '重试' }
       alert(`批量操作失败：${err.message}`)
     }
+  }
+
+  /**
+   * 填充「移到文件夹」下拉框。
+   * @param {HTMLElement} panel - 面板
+   * @returns {Promise<void>} 完成
+   */
+  async function fillFolderOptions(panel) {
+    const select = panel.querySelector('#selbar-folder')
+    const go = panel.querySelector('#selbar-go')
+    if (!select || !go) return
+
+    let folders = []
+    try {
+      const data = await apiFetch('/api/v1/folders')
+      folders = data.folders ?? []
+    } catch {
+      folders = []
+    }
+
+    select.innerHTML = [
+      '<option value="">（根目录）</option>',
+      ...folders.map((f) => `<option value="${esc(f.fid)}">${'　'.repeat(f.depth - 1)}${esc(f.name)}（${f.totalDocCount}）</option>`),
+    ].join('')
+    select.disabled = false
+    go.disabled = false
   }
 
   /**
