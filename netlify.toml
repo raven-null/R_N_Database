@@ -43,6 +43,13 @@
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
+# 图标文件名固定，但不能 immutable —— 重新裁一次图标就得让浏览器换掉。
+# 一周的缓存足够，改完最迟一周内全量生效。
+[[headers]]
+  for = "/img/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
+
 # HTML 一律回源校验：防止 CDN/浏览器长期缓存旧页面导致改版不生效
 [[headers]]
   for = "/*.html"

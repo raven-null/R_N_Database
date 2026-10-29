@@ -4,6 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R_N 资料库</title>
+  <!-- 站点图标：由头像裁剪而来（中心方裁 1056px + 圆角），见 public/img/ -->
+  <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/img/apple-touch-icon.png">
+  <meta name="theme-color" content="#f4efe4">
   <!-- CSS/JS 带 ?v= 版本号：netlify.toml 对 /css/* /js/* 设了 immutable 长缓存，
        改版时必须同步改这里的 v 值，否则客户端拿不到新文件。 -->
   <link rel="stylesheet" href="/css/style.css?v=0.8.3">
@@ -11,7 +16,7 @@
 <body class="list-page">
   <!-- 页面上不摆任何说明文字：能解释的东西全收在 ? 里（悬停 / 聚焦查看）。 -->
   <header class="topbar">
-    <a class="brand" href="/">R_N <span>资料库</span></a>
+    <a class="brand" href="/"><img class="brand-mark" src="/img/favicon-32.png" alt="" width="26" height="26">R_N <span>资料库</span></a>
 
     <div class="search-wrap">
       <span class="search-mark" aria-hidden="true">检</span>

@@ -726,6 +726,16 @@ body.list-page {
   opacity: .88;
 }
 
+/* 站点图标（由头像裁出来）：只当点缀，不抢标题的视觉重心 */
+.brand-mark {
+  width: 26px;
+  height: 26px;
+  margin-right: 8px;
+  border-radius: 7px;
+  vertical-align: -6px;
+  filter: saturate(.92);
+}
+
 .type-badge {
   flex-shrink: 0;
   width: 46px;
