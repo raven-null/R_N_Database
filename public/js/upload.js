@@ -800,7 +800,7 @@ export function mountUpload(opts) {
  * 渲染待处理清单。
  *
  * @param {HTMLElement} container - 容器
- * @param {object} opts - { onChange }
+ * @param {object} opts - { canIngest, onChange, onIngested }
  * @returns {Promise<number>} 待处理数量
  */
 export async function renderPending(container, opts = {}) {
@@ -820,8 +820,12 @@ export async function renderPending(container, opts = {}) {
   container.innerHTML = `
     <div class="pending-head">
       <b>待入库 ${data.total} 份</b>
-      <code>node scripts/process-pending.mjs</code>
-      <button class="tip" type="button" data-tip="上传只把原件存进暂存区；重排、抽正文、转 PDF、分类打标都要在本地跑这条命令完成。&#10;已改动的文件会按路径替换旧版本，不会变成两份。">?</button>
+      ${opts.canIngest
+    ? `<button class="btn primary pending-ingest" id="btn-ingest">立即入库</button>`
+    : `<code>node scripts/process-pending.mjs</code>`}
+      <button class="tip" type="button" data-tip="${opts.canIngest
+    ? '点「立即入库」由服务端直接抽取正文、分类打标、生成预览并更新检索索引，不需要在本地跑命令。&#10;能力边界：Office 文件拿不到 PDF 保真版预览（函数里没有 LibreOffice），也没有 AI 打标与拼音索引 —— 需要那些请用本地命令。&#10;一次最多处理 10 份，剩下的再点一次。'
+    : '上传只把原件存进暂存区；抽正文、分类、预览要入库才算完成。登录后可以直接点「立即入库」。'}">?</button>
     </div>
     <div class="pending-list">
       ${data.items.map((it) => `
@@ -836,7 +840,52 @@ export async function renderPending(container, opts = {}) {
           </div>
           <button class="pending-del" data-del="${esc(it.id)}" aria-label="从暂存区移除">移除</button>
         </div>`).join('')}
-    </div>`
+    </div>
+    <div id="ingest-msg" class="pending-note"></div>`
+
+  /* ---- 立即入库（服务端，不需要 Netlify 令牌）---- */
+  container.querySelector('#btn-ingest')?.addEventListener('click', async () => {
+    const btn = container.querySelector('#btn-ingest')
+    const msg = container.querySelector('#ingest-msg')
+    btn.disabled = true
+    btn.textContent = '入库中…'
+    msg.className = 'pending-note'
+    msg.textContent = '正在抽取正文、分类、生成预览并更新索引（大文件可能要几十秒）…'
+
+    try {
+      const res = await apiFetch('/api/v1/inbox/ingest', { method: 'POST', body: { limit: 5 } })
+      const bad = (res.results ?? []).filter((r) => r.status === 'error' || r.status === 'missing')
+      const dup = (res.results ?? []).filter((r) => r.status === 'duplicate')
+      const ing = (res.results ?? []).filter((r) => r.status === 'ingested')
+
+      const lines = [`已入库 ${ing.length} 份`]
+      if (dup.length) lines.push(`${dup.length} 份库里已有同样内容`)
+      if (bad.length) lines.push(`${bad.length} 份失败`)
+      if (res.remaining > 0) lines.push(`还剩 ${res.remaining} 份，可再点一次`)
+      if (res.indexError) lines.push(res.indexError)
+
+      msg.className = bad.length ? 'pending-note err' : 'pending-note'
+      msg.textContent = lines.join('　·　')
+      for (const r of bad.slice(0, 3)) {
+        msg.textContent += `　✗ ${r.name}：${r.reason}`
+      }
+      if (ing.length) {
+        msg.textContent += `　（首份：${ing[0].title}　${(ing[0].categories ?? []).join('/')}）`
+      }
+
+      opts.onIngested?.(res)
+      // 清单与库都变了，重画（保留这条提示）
+      const keep = msg.textContent
+      await renderPending(container, opts)
+      const again = container.querySelector('#ingest-msg')
+      if (again) again.textContent = keep
+    } catch (err) {
+      msg.className = 'pending-note err'
+      msg.textContent = `入库失败：${err.message}`
+      btn.disabled = false
+      btn.textContent = '立即入库'
+    }
+  })
 
   container.querySelectorAll('[data-del]').forEach((btn) => {
     btn.addEventListener('click', async () => {

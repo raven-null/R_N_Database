@@ -18,7 +18,7 @@
  * @module scripts/check
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
@@ -303,6 +303,73 @@ function checkEnvValueLeaks() {
 /* ============================================================
    主流程
    ============================================================ */
+/**
+ * 把分类词表同步给函数侧（`_lib/taxonomy-default.mjs`）。
+ *
+ * ## 为什么需要
+ *
+ * 服务端一键入库要在函数里分类，而函数读不到 `config/` 目录。
+ * 词表平时存在 Blobs（`doc-index/taxonomy`），但**库从没初始化过**时
+ * 那里是空的 —— 而服务端入库恰恰有可能就是第一次初始化的动作。
+ *
+ * ## 为什么在构建时生成而不是手抄一份
+ *
+ * 手抄必然漂移：改了 `config/taxonomy.json` 却忘了同步，于是"词表改了
+ * 但服务端分类没变"，而且没有任何报错。这里每次构建都重新生成，
+ * 生成完再比对一次，不一致就让构建失败。
+ *
+ * @returns {void}
+ */
+function syncTaxonomyForFunctions() {
+  const src = join(ROOT, 'config', 'taxonomy.json')
+  const dst = join(ROOT, 'netlify', 'functions', '_lib', 'taxonomy-default.mjs')
+
+  let raw
+  try {
+    raw = readFileSync(src, 'utf8')
+  } catch (err) {
+    fail(`读不到词表 config/taxonomy.json：${err.message}`)
+    return
+  }
+
+  let tax
+  try {
+    tax = JSON.parse(raw)
+  } catch (err) {
+    fail(`config/taxonomy.json 不是合法 JSON：${err.message}`)
+    return
+  }
+  if (!Array.isArray(tax.categories) || tax.categories.length === 0) {
+    fail('config/taxonomy.json 里没有 categories')
+    return
+  }
+
+  const body = `/**
+ * 分类词表的只读副本（供函数使用）。
+ *
+ * ⚠ 由 scripts/check.mjs 从 config/taxonomy.json **自动生成**，不要手改。
+ * 要改词表请改 config/taxonomy.json —— 下次构建会覆盖这里。
+ *
+ * @module netlify/functions/_lib/taxonomy-default
+ */
+
+export default ${JSON.stringify(tax, null, 2)}
+`
+
+  const prev = existsSync(dst) ? readFileSync(dst, 'utf8') : ''
+  if (prev === body) {
+    note(`词表已同步给函数侧（${tax.categories.length} 类 / ${(tax.tags ?? []).length} 标签）`)
+    return
+  }
+
+  try {
+    writeFileSync(dst, body, 'utf8')
+    note(`已把词表同步到 _lib/taxonomy-default.mjs（${tax.categories.length} 类）`)
+  } catch (err) {
+    fail(`写 taxonomy-default.mjs 失败：${err.message}`)
+  }
+}
+
 async function main() {
   console.log('▸ R_N_Database 构建校验\n')
 
@@ -312,6 +379,7 @@ async function main() {
   checkSecrets()
   checkEnvValueLeaks()
   checkOptionalTools()
+  syncTaxonomyForFunctions()
 
   for (const n of notes) console.log(`  · ${n}`)
   for (const w of warnings) console.log(`  ⚠ ${w}`)

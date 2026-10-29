@@ -134,6 +134,21 @@ pptx 网页视图    20ms
 代价是图片多的文档体积会涨（base64 内联约 +33%），
 超过 4MB 就跳过网页版、只保留原始版式（入库日志会写明原因）。
 
+### 上传之后：点「立即入库」，或本地跑命令
+
+上传只做第一阶段（原件进暂存区）。第二阶段有两条路：
+
+| 走法 | 需要什么 | 能力 |
+|---|---|---|
+| **网页上点「立即入库」** | 登录即可，**不需要 Netlify 令牌** | 抽正文、规则分类打标、生成预览、更新索引 |
+| 本地 `node scripts/process-pending.mjs` | `.env` 里配 `NETLIFY_ACCESS_TOKEN` | 上面所有 + **Office 转 PDF 高保真预览**、网页视图、AI 打标、拼音索引 |
+
+服务端入库跑在函数里（`POST /api/v1/inbox/ingest`），所以：
+- Office 文件只能拿到**文字版 HTML 预览**（函数里没有 LibreOffice），
+  文档的 `previewNote` 会明写「要 PDF 保真版请在本地跑命令」
+- 一次最多 10 份，默认 3 份；超时预算 45 秒，剩下的再点一次
+- 重复内容自动识别，不会重复入库，也不会在暂存区留垃圾
+
 ### 上传：单个文件、整个文件夹、或直接拖进来，而且是**增量**的
 
 网页上传是**两阶段**的第一阶段：原件先进暂存区，重活留到本地跑
@@ -251,13 +266,14 @@ npm run test:edit          # 内容编辑：原件/正文/预览/索引全链路
 npm run test:office        # Office 网页视图：Word/Excel/PPT 与 PDF 对照（47 项）
 npm run test:upload        # 整文件夹上传 + 增量同步：改/加/留/删（69 项）
 npm run test:dir           # 按来源目录浏览：路径派生 + 树 + 前缀筛选（37 项）
+npm run test:serve         # 服务端一键入库：抽取/分类/预览/索引/幂等（39 项）
 npm run test:markdown      # Markdown 双视图（21 项）
 npm run test:dom           # 前端 jsdom 冒烟（55 项）
 npm run test:render        # 真实浏览器渲染检查（CDP，含截图）
 ```
 
 依赖服务器的几项（`test:api` / `test:batch` / `test:edit` / `test:office` /
-`test:upload` / `test:dir` / `test:markdown` / `test:dom`）需要先 `npm run dev`。
+`test:upload` / `test:dir` / `test:serve` / `test:markdown` / `test:dom`）需要先 `npm run dev`。
 
 两条约定：
 
@@ -380,6 +396,8 @@ PATCH  /api/v1/tags/{name}               重命名标签（全库同步）
 DELETE /api/v1/tags/{name}               删除标签
 POST   /api/v1/inbox?name=&path=       上传到暂存区（两阶段入库的第一阶段）
 POST   /api/v1/inbox/check             增量比对：这批文件哪些需要真的上传
+POST   /api/v1/inbox/chunk             分片上传（>4MB 的文件，绕开 6MB 请求体上限）
+POST   /api/v1/inbox/ingest            服务端一键入库（admin，不需要 Netlify 令牌）
 ```
 
 写操作一律要求 admin 令牌；read 令牌（工作站 / 博客）只能读。

@@ -1109,6 +1109,11 @@ iframe {
   color: var(--warn);
   font-size: 11.5px;
 }
+/* 「立即入库」：服务端入库，不需要本地命令与令牌 */
+.pending-ingest {
+  padding: 2px 12px 3px;
+  font-size: 12.5px;
+}
 .pending-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .pending-item {
   display: flex;

@@ -28,6 +28,7 @@ import { ok, badRequest, notFound, unauthorized, forbidden, serverError } from '
 import { getDocsStore, STORES } from '../store.mjs'
 import { readAllMeta } from '../repo.mjs'
 import { detectType, titleFromFilename, SUPPORTED_EXTENSIONS } from '../file-types.mjs'
+import { ingestPending } from '../server-ingest.mjs'
 
 /**
  * 单次 **HTTP 请求**的请求体上限。
@@ -141,6 +142,14 @@ export async function inboxRoute(req, url, seg) {
     if (seg.length === 1 && seg[0] === 'check') {
       if (req.method !== 'POST') return badRequest('比对接口只接受 POST', { req })
       return checkBatch(req)
+    }
+
+    // ---- POST /api/v1/inbox/ingest ----
+    // 服务端一键入库：网页上传完点一下，函数直接把暂存区的文件变成文档。
+    // 有了它，用户不必为"入库"去弄 Netlify 访问令牌（见 server-ingest.mjs）。
+    if (seg.length === 1 && seg[0] === 'ingest') {
+      if (req.method !== 'POST') return badRequest('入库接口只接受 POST', { req })
+      return ingestPending(req, url)
     }
 
     // ---- 分片上传（大文件绕开 6MB 请求体上限）----

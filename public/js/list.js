@@ -692,7 +692,11 @@ async function main() {
  */
 async function renderPendingList() {
   await renderPending(el.pending, {
+    // 登录后才有「立即入库」按钮：它要做的事是写库，guest 做不了
+    canIngest: state.auth?.authenticated === true,
     onChange: () => { /* 移除后自己会重画 */ },
+    // 入库成功 → 库变了，重新拉清单
+    onIngested: () => { refreshManifest() },
   })
 }
 

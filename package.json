@@ -37,6 +37,7 @@
     "test:office": "node scripts/test-office-views.mjs",
     "test:upload": "node scripts/test-folder-upload.mjs",
     "test:dir": "node scripts/test-dir-view.mjs",
+    "test:serve": "node scripts/test-server-ingest.mjs",
     "process-pending": "node scripts/process-pending.mjs",
     "test:batch": "node scripts/test-batch-tags.mjs",
     "test:access": "node scripts/test-access.mjs"
