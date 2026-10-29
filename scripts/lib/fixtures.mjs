@@ -22,6 +22,8 @@ import { spawn } from 'node:child_process'
 import zlib from 'node:zlib'
 import JSZip from 'jszip'
 
+import { testChildEnv } from './test-env.mjs'
+
 /**
  * 生成一份**最小但合法**的单页 PDF。
  *
@@ -282,6 +284,8 @@ export function ingestFile(root, file) {
     const child = spawn(process.execPath, [join(root, 'scripts', 'ingest.mjs'), file, '--no-ai'], {
       cwd: root,
       stdio: 'ignore',
+      // 钉死本地存储：别继承开发者 .env 里的 remote 模式（见 test-env.mjs）
+      env: testChildEnv(),
     })
     child.on('error', reject)
     child.on('exit', (code) => resolve(code ?? 1))

@@ -206,6 +206,23 @@ export function classifyByRules(title, text, taxonomy) {
       score += contribution * specificity
     }
 
+    // 体裁信号：书/论文靠结构自我暴露（参考文献、致谢、本章、练习题）。
+    // 与主题词分开计分，因为它们是**另一类证据** —— 见词表里 _genreSignals 的说明。
+    // 每个标记只计一次：一本 300 页的书里「本章」会出现几十次，按次数算会压垮一切。
+    const genre = taxonomy._genreSignals?.[cat.name]
+    if (genre) {
+      const strongW = Number(genre.strongWeight) || 10
+      const mediumW = Number(genre.mediumWeight) || 4
+      for (const m of genre.strong ?? []) {
+        const k = String(m).toLowerCase()
+        if (containsTerm(titleLower, k) || containsTerm(headLower, k)) score += strongW
+      }
+      for (const m of genre.medium ?? []) {
+        const k = String(m).toLowerCase()
+        if (containsTerm(titleLower, k) || containsTerm(headLower, k)) score += mediumW
+      }
+    }
+
     if (score > 0) scores[cat.name] = Math.round(score * 100) / 100
   }
 

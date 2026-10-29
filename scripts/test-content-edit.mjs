@@ -27,6 +27,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { testChildEnv } from './lib/test-env.mjs'
 
 const ROOT = process.cwd()
 const BASE = process.env.SMOKE_BASE ?? 'http://127.0.0.1:8899'
@@ -100,6 +101,7 @@ function ingest(file) {
     const child = spawn(process.execPath, [join(ROOT, 'scripts', 'ingest.mjs'), file, '--no-ai'], {
       cwd: ROOT,
       stdio: 'ignore',
+      env: testChildEnv(),
     })
     child.on('error', reject)
     child.on('exit', (code) => resolve(code ?? 1))

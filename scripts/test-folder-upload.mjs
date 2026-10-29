@@ -28,6 +28,8 @@ import { closeSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { JSDOM, VirtualConsole } from 'jsdom'
 
+import { testChildEnv } from './lib/test-env.mjs'
+
 const ROOT = process.cwd()
 const BASE = process.env.SMOKE_BASE ?? 'http://127.0.0.1:8899'
 
@@ -656,6 +658,7 @@ async function processPending(args = []) {
       const child = spawn(process.execPath, [join(ROOT, 'scripts', 'process-pending.mjs'), ...args], {
         cwd: ROOT,
         stdio: ['ignore', fd, fd],
+        env: testChildEnv(),
       })
       child.on('error', reject)
       child.on('exit', (c) => resolve(c ?? 1))
