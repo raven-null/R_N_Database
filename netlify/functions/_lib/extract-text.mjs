@@ -47,6 +47,16 @@ export { detectType, mimeOf, titleFromFilename }
 const MAX_TEXT_CHARS = 2_000_000
 
 /**
+ * 单份 PDF 逐页抽正文的时间预算（毫秒）。
+ *
+ * 函数同步执行上限 60 秒，服务端入库还给每次调用留了 45 秒预算。
+ * 几百页的书逐页 getTextContent() 会撞线，而撞线等于整份失败。
+ * 所以超过预算就带着已抽到的页收工：分类、全文检索、标签都够用，
+ * 预览本来就是原件 PDF。环境变量可调，便于本地跑全量。
+ */
+const PDF_BUDGET_MS = Number(process.env.PDF_EXTRACT_BUDGET_MS ?? 25_000)
+
+/**
  * 判断该类型能否抽取正文。
  * @param {string} type - 规范化类型
  * @returns {boolean} 是否支持
@@ -141,6 +151,7 @@ export function pickTitle(embedded, fromName) {
  */
 async function extractPdf(buf) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const startedAt = Date.now()
 
   const loadingTask = pdfjs.getDocument({
     // 复制一份 Uint8Array：pdfjs 会转移（transfer）这个 buffer，
@@ -154,8 +165,16 @@ async function extractPdf(buf) {
 
   const pages = []
   let total = 0
+  let truncated = false
 
   for (let i = 1; i <= doc.numPages; i++) {
+    // 时间预算：函数同步执行上限 60 秒，几百页的书逐页抽会撞线。
+    // 与其整份失败，不如带着已经抽到的前几十页收工 —— 分类与全文
+    // 检索都够用，原件预览本来就是 PDF 本身。
+    if (i > 1 && Date.now() - startedAt > PDF_BUDGET_MS) {
+      truncated = true
+      break
+    }
     const page = await doc.getPage(i)
     const content = await page.getTextContent()
     // 按 hasEOL 拼行，避免同一行内被无谓切开
@@ -181,6 +200,8 @@ async function extractPdf(buf) {
 
   const meta = {
     pages: doc.numPages,
+    pagesExtracted: pages.length,
+    truncated,
     title: typeof info.Title === 'string' ? info.Title.trim() : '',
     author: typeof info.Author === 'string' ? info.Author.trim() : '',
     subject: typeof info.Subject === 'string' ? info.Subject.trim() : '',
@@ -499,6 +520,9 @@ export async function extractBytes(input, type) {
         author: meta.author,
         docCreatedAt: meta.docCreatedAt,
         pageTexts: pages,
+        // 大 PDF 可能只抽了前若干页（见 PDF_BUDGET_MS），调用方据此提示
+        textTruncated: Boolean(meta.truncated),
+        pagesExtracted: meta.pagesExtracted,
         text: cleanText(pages.join('\n\n')).slice(0, MAX_TEXT_CHARS),
       }
     }

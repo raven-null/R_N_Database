@@ -165,6 +165,11 @@ async function ingestOne(ctx) {
 
   if (type === 'pdf') {
     previewKind = 'pdf'                       // 原件即最佳预览
+    // 大 PDF 只抽了前若干页：页面与搜索可用，但别让人以为全书都进库了
+    if (extracted.textTruncated) {
+      previewNote = `正文只抽了前 ${extracted.pagesExtracted ?? '若干'} 页`
+        + `（共 ${extracted.pages ?? '?'} 页，超时保护）；要全量请本地跑 node scripts/ingest.mjs`
+    }
   } else if (type === 'md') {
     const r = renderMarkdownPage(buf.toString('utf8'), title)
     await previewStore.set(`${id}.html`, r.html)
