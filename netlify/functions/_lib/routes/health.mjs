@@ -44,6 +44,11 @@ export async function healthRoute(req, url) {
       store: { ...store, stores: Object.values(STORES) },
       auth,
       docCount,
+      // 部署的是哪一版？Netlify 构建时注入 COMMIT_REF。
+      // 曾经因为「改了代码但线上还是旧的」白白排查半天，
+      // 有这一行就能一眼确认函数到底是新是旧。
+      commit: String(process.env.COMMIT_REF ?? '').slice(0, 7) || null,
+      branch: process.env.BRANCH ?? null,
       runtime: rt,
       allowedOrigins: allowedOrigins(),
       hints: buildHints(store, auth, rt, docCount),

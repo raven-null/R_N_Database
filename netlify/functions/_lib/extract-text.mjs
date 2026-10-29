@@ -151,6 +151,16 @@ export function pickTitle(embedded, fromName) {
  */
 async function extractPdf(buf) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+
+  // 让 pdfjs 用「主线程 worker」而不是去动态 import 打包产物里的 worker 文件。
+  // pdfjs 的 _setupFakeWorkerGlobal 先看 globalThis.pdfjsWorker，
+  // 有就直接用；没有才按相对路径 import('./pdf.worker.mjs')。后者在
+  // esbuild 打包后的 /var/task 里是不存在的，线上会报
+  //   Setting up fake worker failed: Cannot find module .../pdf.worker.mjs
+  // 自己把 worker 模块 import 进来挂上去，就把这条路彻底绕开了。
+  if (!globalThis.pdfjsWorker) {
+    globalThis.pdfjsWorker = await import('pdfjs-dist/legacy/build/pdf.worker.mjs')
+  }
   const startedAt = Date.now()
 
   const loadingTask = pdfjs.getDocument({
