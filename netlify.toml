@@ -20,6 +20,14 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
+  # 不要把 pdfjs-dist 打进 bundle。原因不是体积，而是它会在运行时
+  # 动态 import 同目录下的 ./pdf.worker.mjs —— esbuild 只跟踪静态 import，
+  # 打包后这个相对路径在 /var/task 里不存在，线上抽 PDF 就报
+  #   Setting up fake worker failed: Cannot find module
+  #   '/var/task/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'
+  # 列成 external 后，Netlify 会把整个包放进函数的 node_modules，
+  # 相对路径就又能解析了。（本地开发天然有 node_modules，所以看不出来。）
+  external_node_modules = ["pdfjs-dist"]
 
 # ============================================================
 # 安全响应头
