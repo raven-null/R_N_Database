@@ -30,6 +30,21 @@ import { metaTextOf, termCounts, computeIndexVersion } from './tokenize.mjs'
 /** 分片数量。取 128：256 份文档时每片约 49KB，一次检索读取量降到约 1/32。 */
 export const SHARD_COUNT = 128
 
+/**
+ * 空索引的元信息。
+ *
+ * ★ 别再抛「索引尚未初始化」了。这是一个真实事故的教训：
+ * 线上新库从来跑过 reindex，于是服务端入库时的每次增量更新都抛错，
+ * 而调用方把错误收进 indexError、仍删掉了暂存记录 ——
+ * 结果 META 里躺着 44 份文档，索引是空的，站点上「0 份文档」。
+ * 没有索引就从**空索引**开始，增量更新自己会建出需要的分片。
+ *
+ * @returns {object} 空索引元信息
+ */
+function EMPTY_INDEX_META() {
+  return { version: 'init', builtAt: null, docCount: 0, termCount: 0, avgLength: 0, lengths: {} }
+}
+
 /** meta 的 blob key。 */
 const META_KEY = 'index-meta'
 
@@ -159,8 +174,7 @@ export async function applyDocChangesBulk(changes) {
   const store = await getDocsStore(STORES.INDEX)
   const textStore = await getDocsStore(STORES.TEXT)
 
-  const meta = await readIndexMeta()
-  if (!meta) throw new Error('索引尚未初始化，请先运行 node scripts/reindex.mjs')
+  const meta = await readIndexMeta() ?? EMPTY_INDEX_META()
 
   const docs = (await store.get('docs', { type: 'json' })) ?? []
   const docById = new Map(docs.map((d) => [d.id, d]))
@@ -321,8 +335,7 @@ export async function applyDocChange(opts) {
   const store = await getDocsStore(STORES.INDEX)
   const textStore = await getDocsStore(STORES.TEXT)
 
-  const meta = await readIndexMeta()
-  if (!meta) throw new Error('索引尚未初始化，请先运行 node scripts/reindex.mjs')
+  const meta = await readIndexMeta() ?? EMPTY_INDEX_META()
 
   const docs = (await store.get('docs', { type: 'json' })) ?? []
 

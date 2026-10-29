@@ -23,7 +23,9 @@ import { taxonomyRoute, manifestRoute } from './_lib/routes/meta.mjs'
 import { authRoute } from './_lib/routes/auth.mjs'
 import { batchRoute, tagRenameRoute, tagDeleteRoute, tagStatsRoute } from './_lib/routes/docs-batch.mjs'
 import { inboxRoute } from './_lib/routes/inbox.mjs'
-import { notFound, preflight, serverError } from './_lib/respond.mjs'
+import { repairIndex } from './_lib/index-repair.mjs'
+import { checkAuth } from './_lib/auth.mjs'
+import { badRequest, forbidden, notFound, preflight, serverError } from './_lib/respond.mjs'
 
 /** API 前缀。 */
 const PREFIX = '/api/v1'
@@ -85,6 +87,18 @@ export default async (req) => {
         return await manifestRoute(req, url)
       case 'auth':
         return await authRoute(req, url, seg.slice(1))
+
+      case 'index':
+        // POST /index/repair —— 从 META 重建索引（admin）。
+        // 线上新库从没跑过 reindex 时需要它；本地等价物是 scripts/reindex.mjs。
+        if (seg[1] === 'repair') {
+          if (req.method !== 'POST') return badRequest('重建索引请用 POST', { req })
+          const a = await checkAuth(req, url, 'admin')
+          if (!a.ok) return forbidden('重建索引需要登录（管理员密码）', { req })
+          return await repairIndex(req, url)
+        }
+        return notFound(`未知子路径：${seg.join('/')}`, { req })
+
       default:
         return notFound(`未知接口：${seg[0]}`, { req })
     }
