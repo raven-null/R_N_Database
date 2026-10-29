@@ -39,6 +39,8 @@ export const STORES = {
   AUTH: 'doc-auth',
   /** 导出/备份的 zip 暂存（下载后即可清） */
   EXPORTS: 'doc-exports',
+  /** 虚拟文件夹树（key = fid，值 = 节点） */
+  FOLDERS: 'doc-folders',
   /**
    * 待处理的上传暂存区。
    *

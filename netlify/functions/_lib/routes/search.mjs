@@ -12,6 +12,8 @@ import { checkAuth } from '../auth.mjs'
 import { ok, badRequest, forbidden, unauthorized, serverError } from '../respond.mjs'
 import { readAllMeta, readIndexMeta, readPostingsForTerms, readDocText } from '../repo.mjs'
 import { searchIndex, makeSnippet, queryTerms } from '../tokenize.mjs'
+import { loadFolders } from '../folders.mjs'
+import { visibleDocs } from '../doc-dir.mjs'
 
 /** 默认返回条数。 */
 const DEFAULT_LIMIT = 30
@@ -35,10 +37,10 @@ export async function searchRoute(req, url) {
   if (!q) return badRequest('缺少查询参数 q', { req })
 
   try {
+    const folderIndex = await loadFolders()
     const docs = await readAllMeta()
-    const visible = auth.role === 'guest'
-      ? docs.filter((d) => d.visibility === 'public')
-      : docs
+    // 访客只搜得到公开文档；文件夹设了私有，里面的文档一并不可见
+    const visible = visibleDocs(docs, auth, folderIndex)
 
     const indexMeta = await readIndexMeta()
     if (!indexMeta) {

@@ -24,6 +24,8 @@ import { renderCodePage } from '../code-view.mjs'
 import { renderMarkdownPage } from '../markdown-view.mjs'
 import { isEditableType } from '../file-types.mjs'
 import { normalizeDoc } from '../doc-model.mjs'
+import { loadFolders } from '../folders.mjs'
+import { dirOfDoc, isPublicDoc, visibleDocs } from '../doc-dir.mjs'
 import { plainTextOf, countLines } from '../plain-text.mjs'
 import { dirOf } from '../source-dir.mjs'
 
@@ -482,9 +484,8 @@ function describeAuthFailure(reason) {
  * @param {object} auth - 鉴权结果
  * @returns {object[]} 过滤后的列表
  */
-function applyRoleFilter(docs, auth) {
-  if (auth.role !== 'guest') return docs
-  return docs.filter((d) => d.visibility === 'public')
+function applyRoleFilter(docs, auth, folderIndex = null) {
+  return visibleDocs(docs, auth, folderIndex)
 }
 
 /**
@@ -496,7 +497,8 @@ function applyRoleFilter(docs, auth) {
  */
 async function listDocs(req, url, auth) {
   const p = url.searchParams
-  let docs = applyRoleFilter(await readAllMeta(), auth)
+  const folderIndex = await loadFolders()
+  let docs = applyRoleFilter(await readAllMeta(), auth, folderIndex)
 
   // ---- 筛选 ----
   const q = (p.get('q') ?? '').trim().toLowerCase()
@@ -535,7 +537,7 @@ async function listDocs(req, url, auth) {
   const limit = Math.min(Math.max(Number(p.get('limit')) || DEFAULT_LIMIT, 1), MAX_LIMIT)
   const page = Math.max(Number(p.get('page')) || 1, 1)
   const start = (page - 1) * limit
-  const items = docs.slice(start, start + limit).map(toListItem)
+  const items = docs.slice(start, start + limit).map((d) => toListItem(d, folderIndex))
 
   return ok({
     total,
@@ -543,7 +545,7 @@ async function listDocs(req, url, auth) {
     limit,
     pageCount: Math.max(Math.ceil(total / limit), 1),
     sort: sortKey,
-    facets: tally(applyRoleFilter(await readAllMeta(), auth)),
+    facets: tally(applyRoleFilter(await readAllMeta(), auth, folderIndex)),
     items,
   }, { req })
 }
@@ -553,7 +555,7 @@ async function listDocs(req, url, auth) {
  * @param {object} d - 元数据
  * @returns {object} 列表项
  */
-function toListItem(d) {
+function toListItem(d, folderIndex = null) {
   return {
     id: d.id,
     title: d.title,
@@ -575,8 +577,8 @@ function toListItem(d) {
     webView: d.webView,
     ingestedAt: d.ingestedAt,
     docCreatedAt: d.docCreatedAt,
-    // 来源目录（由 sourcePath 派生），供「按目录浏览」用
-    dir: dirOf(d.sourcePath),
+    // 目录：优先取文件夹树路径（可在网页上改名/移动），否则退回 sourcePath 派生
+    dir: dirOfDoc(d, folderIndex),
   }
 }
 
@@ -590,7 +592,7 @@ function toListItem(d) {
 async function detail(req, id, auth) {
   const meta = await readMeta(id)
   if (!meta) return notFound('文档不存在', { req })
-  if (auth.role === 'guest' && meta.visibility !== 'public') {
+  if (auth.role === 'guest' && !isPublicDoc(meta, await loadFolders())) {
     return forbidden('该文档未公开', { req })
   }
   return ok(meta, { req })
@@ -608,7 +610,7 @@ async function detail(req, id, auth) {
 async function originalFile(req, url, id, auth) {
   const meta = await readMeta(id)
   if (!meta) return notFound('文档不存在', { req })
-  if (auth.role === 'guest' && meta.visibility !== 'public') {
+  if (auth.role === 'guest' && !isPublicDoc(meta, await loadFolders())) {
     return forbidden('该文档未公开', { req })
   }
 
@@ -658,7 +660,7 @@ async function originalFile(req, url, id, auth) {
 async function preview(req, url, id, auth) {
   const meta = await readMeta(id)
   if (!meta) return notFound('文档不存在', { req })
-  if (auth.role === 'guest' && meta.visibility !== 'public') {
+  if (auth.role === 'guest' && !isPublicDoc(meta, await loadFolders())) {
     return forbidden('该文档未公开', { req })
   }
 
@@ -814,7 +816,7 @@ async function preview(req, url, id, auth) {
 async function docText(req, url, id, auth) {
   const meta = await readMeta(id)
   if (!meta) return notFound('文档不存在', { req })
-  if (auth.role === 'guest' && meta.visibility !== 'public') {
+  if (auth.role === 'guest' && !isPublicDoc(meta, await loadFolders())) {
     return forbidden('该文档未公开', { req })
   }
 

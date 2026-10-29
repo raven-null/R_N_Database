@@ -11,6 +11,8 @@ import { checkAuth } from '../auth.mjs'
 import { ok, forbidden, unauthorized, serverError } from '../respond.mjs'
 import { readAllMeta, readIndexMeta, readTaxonomy, tally } from '../repo.mjs'
 import { dirOf } from '../source-dir.mjs'
+import { loadFolders, listFolders } from '../folders.mjs'
+import { dirOfDoc, visibleDocs } from '../doc-dir.mjs'
 
 /**
  * 统一鉴权：分类词表与清单都只需 guest（未登录即可，
@@ -85,8 +87,8 @@ export async function manifestRoute(req, url) {
   if (response) return response
 
   try {
-    let docs = await readAllMeta()
-    if (auth.role === 'guest') docs = docs.filter((d) => d.visibility === 'public')
+    const folderIndex = await loadFolders()
+    const docs = visibleDocs(await readAllMeta(), auth, folderIndex)
 
     // 只读 meta（几 KB），不再为了版本号把整个索引拉下来
     const indexMeta = await readIndexMeta()
@@ -129,9 +131,12 @@ export async function manifestRoute(req, url) {
         docCreatedAt: d.docCreatedAt,
         // 来源目录：库是扁平的，这一项让前端能画出「按目录浏览」的树。
         // 由 sourcePath 派生，不单独存（见 _lib/source-dir.mjs）
-        dir: dirOf(d.sourcePath),
+        dir: dirOfDoc(d, folderIndex),
+        folderId: d.folderId ?? null,
         sourcePath: d.sourcePath ?? '',
       })),
+      // 文件夹树：前端 sidebar 直接渲染，空文件夹也在里面
+      folders: listFolders(folderIndex, docs),
       taxonomy: await readTaxonomy(),
     }
 

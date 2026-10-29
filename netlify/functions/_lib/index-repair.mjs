@@ -27,6 +27,8 @@ import { getDocsStore, STORES } from './store.mjs'
 import { buildIndex } from './tokenize.mjs'
 import { writeIndex, readIndexMeta } from './index-store.mjs'
 import { SCHEMA_VERSION, migrateDoc } from './doc-model.mjs'
+import { loadFolders, ensurePath } from './folders.mjs'
+import { dirOf } from './source-dir.mjs'
 import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 
 /** 单次重建最多处理多少份文档（再多会撞函数时限）。 */
@@ -62,6 +64,40 @@ async function migrateAll(metas) {
     await store.set(m.id, JSON.stringify(doc))
   }
   return todo.length
+}
+
+/**
+ * 把还没有归属的文档挂到文件夹树上。
+ *
+ * 文件夹树是后来才有的：老数据只有 `sourcePath`（字符串路径），没有 `folderId`。
+ * 这里按它们**已经显示的目录**逐级建节点 —— 所以升级完看到的样子和升级前一致，
+ * 只是从此以后可以改名、移动、建空文件夹了。
+ *
+ * `folderId` 不参与倒排索引（`metaTextOf` 只取标题/摘要/标签/分类），
+ * 所以这一步只写元数据，不动索引。
+ *
+ * @param {object[]} metas - 全部元数据（会被就地修改）
+ * @returns {Promise<{linked:number, folders:number}>} 结果
+ */
+async function linkFolders(metas) {
+  const todo = metas.filter((m) => !m.folderId)
+  if (todo.length === 0) {
+    const idx = await loadFolders()
+    return { linked: 0, folders: idx.nodes.size }
+  }
+
+  const idx = await loadFolders()
+  const store = await getDocsStore(STORES.META)
+  let linked = 0
+  for (const m of todo) {
+    const dir = dirOf(m.sourcePath)
+    const parts = dir ? dir.split('/').filter(Boolean) : []
+    const fid = await ensurePath(idx, parts)
+    m.folderId = fid ?? null
+    await store.set(m.id, JSON.stringify(m))
+    linked += 1
+  }
+  return { linked, folders: idx.nodes.size }
 }
 
 /**
@@ -138,6 +174,7 @@ export async function repairIndex(req, url) {
 
     const visibilityFixed = await backfillVisibility(meta)
     const migrated = await migrateAll(meta)
+    const folderLink = await linkFolders(meta)
 
     const index = buildIndex(meta, (d) => texts.get(d.id) ?? '')
     const written = await writeIndex(index)
@@ -158,11 +195,14 @@ export async function repairIndex(req, url) {
       shards: written.shards,
       visibilityFixed,
       migrated,
+      foldersLinked: folderLink.linked,
+      folders: folderLink.folders,
       schemaVersion: SCHEMA_VERSION,
       version: after?.version ?? index.version,
       note: `已从 ${meta.length} 份元数据重建索引（${texts.size} 份有正文）`
         + (visibilityFixed > 0 ? `，补写可见性 ${visibilityFixed} 份` : '')
         + (migrated > 0 ? `，升级模型 ${migrated} 份` : '')
+        + (folderLink.linked > 0 ? `，归位文件夹 ${folderLink.linked} 份` : '')
         + '。',
     }, { req })
   } catch (err) {

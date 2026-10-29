@@ -27,6 +27,7 @@ import { authRoute } from './_lib/routes/auth.mjs'
 import { batchRoute, tagRenameRoute, tagDeleteRoute, tagStatsRoute } from './_lib/routes/docs-batch.mjs'
 import { inboxRoute } from './_lib/routes/inbox.mjs'
 import { exportRoute } from './_lib/routes/export.mjs'
+import { foldersRoute } from './_lib/routes/folders.mjs'
 import { repairIndex } from './_lib/index-repair.mjs'
 import { checkAuth } from './_lib/auth.mjs'
 import { badRequest, forbidden, notFound, preflight, serverError } from './_lib/respond.mjs'
@@ -82,6 +83,13 @@ export default async (req) => {
 
       case 'inbox':
         return await inboxRoute(req, url, seg.slice(1))
+
+      case 'folders':
+        // GET    /folders          文件夹树
+        // POST   /folders          新建（admin）
+        // PATCH  /folders/{fid}    改名 / 移动 / 改可见性（admin）
+        // DELETE /folders/{fid}    删除（子项上移，不销毁数据）
+        return await foldersRoute(req, url, seg.slice(1))
 
       case 'search':
         return await searchRoute(req, url)

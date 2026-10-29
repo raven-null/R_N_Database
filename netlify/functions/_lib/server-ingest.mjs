@@ -51,6 +51,7 @@ import { applyDocChange } from './index-store.mjs'
 import { escHtml } from './source-view.mjs'
 import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 import { normalizeDoc } from './doc-model.mjs'
+import { loadFolders, ensurePath } from './folders.mjs'
 
 /** 单次最多处理多少份（再多会顶到函数时限）。 */
 const MAX_PER_CALL = 10
@@ -162,6 +163,12 @@ async function ingestOne(ctx) {
   const dirHint = relParts.slice(0, -1).slice(-4).join(' ')
   const classifyTitle = dirHint ? `${title} ${dirHint}` : title
 
+  // ---- 文件夹：按上传时的相对路径逐级落位 ----
+  // 幂等（同名同父复用），所以重复推同一个目录不会长出重复文件夹。
+  // 根名固定用「上传」，与 source-dir.mjs 的展示规则一致，保证老数据的 dir 不变。
+  const uploadRoot = ['上传', ...relParts.slice(0, -1)]
+  const folderId = await ensurePath(ctx.folders, uploadRoot)
+
   const cls = classifyByRules(classifyTitle, extracted.text, taxonomy)
   const tags = mergeTagsFor(cls.categories, cls.tags, taxonomy)
 
@@ -209,6 +216,8 @@ async function ingestOne(ctx) {
     embeddedTitle: extracted.title || '',
     originalName: rec.originalName,
     relativePath: rec.relativePath,
+    // 所属文件夹（虚拟树）。`dir` 展示值由它派生，改名/移动时自动跟着变。
+    folderId,
     ext,
     type,
     mime: mimeOf(type),
@@ -350,6 +359,9 @@ export async function ingestPending(req, url) {
       inbox,
       taxonomy,
       existingByHash,
+      // 文件夹树：整个请求共用一份快照，逐份 ensurePath 往里加，
+      // 避免"同一批文件把同一个文件夹建了 N 次"
+      folders: await loadFolders(),
       filesStore: await getDocsStore(STORES.FILES),
       textStore: await getDocsStore(STORES.TEXT),
       previewStore: await getDocsStore(STORES.PREVIEWS),
