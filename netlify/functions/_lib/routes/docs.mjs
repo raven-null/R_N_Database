@@ -23,6 +23,7 @@ import { renderSourcePage } from '../source-view.mjs'
 import { renderCodePage } from '../code-view.mjs'
 import { renderMarkdownPage } from '../markdown-view.mjs'
 import { isEditableType } from '../file-types.mjs'
+import { normalizeDoc } from '../doc-model.mjs'
 import { plainTextOf, countLines } from '../plain-text.mjs'
 import { dirOf } from '../source-dir.mjs'
 
@@ -203,7 +204,9 @@ async function updateDoc(req, id, auth) {
   }
 
   const now = new Date().toISOString()
-  const newMeta = {
+  // 人工编辑同样过 normalizeDoc：可见性/标签/数组形态走同一套规则，
+  // 顺手把 rev +1，给乐观锁与「谁改的」留痕
+  const newMeta = normalizeDoc({
     ...oldMeta,
     ...patch,
     // 人工编辑过就不再是"待复查"
@@ -211,9 +214,11 @@ async function updateDoc(req, id, auth) {
     classifySource: oldMeta.classifySource === 'ai' || oldMeta.classifySource === 'rules'
       ? `${oldMeta.classifySource}+manual`
       : 'manual',
+    classify: { ...(oldMeta.classify ?? {}), source: 'manual' },
+    rev: (Number(oldMeta.rev) || 1) + 1,
     editedAt: now,
     updatedAt: now,
-  }
+  })
 
   const metaStore = await getDocsStore(STORES.META)
   await metaStore.set(id, JSON.stringify(newMeta))
@@ -564,6 +569,8 @@ function toListItem(d) {
     pinyin: d.pinyin ?? null,
     hasText: Boolean(d.hasText),
     needsReview: Boolean(d.needsReview),
+    // 列表里要显示锁标记：默认私有之后，「为什么访客看不到」必须一眼可见
+    visibility: d.visibility === 'public' ? 'public' : 'private',
     previewKind: d.previewKind,
     webView: d.webView,
     ingestedAt: d.ingestedAt,

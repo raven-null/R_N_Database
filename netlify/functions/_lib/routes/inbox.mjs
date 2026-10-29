@@ -27,7 +27,7 @@ import { checkAuth } from '../auth.mjs'
 import { ok, badRequest, notFound, unauthorized, forbidden, serverError } from '../respond.mjs'
 import { getDocsStore, STORES } from '../store.mjs'
 import { readAllMeta } from '../repo.mjs'
-import { detectType, titleFromFilename, SUPPORTED_EXTENSIONS } from '../file-types.mjs'
+import { detectType, titleFromFilename, rejectionReason, SUPPORTED_GROUPS } from '../file-types.mjs'
 import { ingestPending } from '../server-ingest.mjs'
 
 /**
@@ -351,11 +351,16 @@ function parseNameAndPath(req, url) {
 
   const type = detectType(name)
   if (!type) {
+    // 拒收与"不认识"要分开说：前者是故意的，得讲清理由（比如私钥不该进这个库）；
+    // 后者顺手把支持范围按类别列出来，而不是甩一串扩展名。
+    const why = rejectionReason(name)
+    const groups = SUPPORTED_GROUPS.map((g) => `${g.label} ${g.exts.join(' ')}`).join('、')
     return {
       name,
       relPath: '',
-      error: badRequest(`不支持的类型：${name.split('.').pop() || '(无扩展名)'}。`
-        + `支持 ${SUPPORTED_EXTENSIONS.join(' / ')}`, { req }),
+      error: badRequest(why
+        ? `拒收「${name}」：${why}`
+        : `不支持的类型：${name.split('.').pop() || '(无扩展名)'}。支持 ${groups}`, { req }),
     }
   }
 

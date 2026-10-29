@@ -797,6 +797,47 @@ export function mountUpload(opts) {
 }
 
 /**
+ * 在入库结果后面挂一个「设为公开」按钮。
+ *
+ * 为什么必须有：新文档默认私有（见 _lib/doc-model.mjs 的 DEFAULT_VISIBILITY），
+ * 于是「入库成功」与「页面上看不到」会同时发生 —— 这是我们**主动**选的默认值，
+ * 但如果不给一键出路，用户只会以为又坏了。
+ *
+ * 成功后把提示改成已公开，按钮自己消失，不留悬念。
+ *
+ * @param {HTMLElement} holder - 放提示的元素（#ingest-msg）
+ * @param {string[]} docIds - 本次入库的文档 id
+ * @returns {void}
+ */
+function addPublishOffer(holder, docIds) {
+  if (docIds.length === 0) return
+
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'btn pending-publish'
+  btn.textContent = `设为公开（${docIds.length} 份）`
+  btn.setAttribute('data-tip', '新文档默认是私有的：只有登录后才看得到。设为公开后，未登录的访客也能浏览与下载。')
+  btn.addEventListener('click', async () => {
+    btn.disabled = true
+    btn.textContent = '设置中…'
+    try {
+      await apiFetch('/api/v1/docs/batch', {
+        method: 'POST',
+        body: { op: 'setVisibility', ids: docIds, visibility: 'public' },
+      })
+      holder.textContent = `已设为公开（${docIds.length} 份），刷新即可看到访客视角的效果`
+    } catch (err) {
+      holder.className = 'pending-note err'
+      holder.textContent = `设为公开失败：${err.message}`
+      btn.disabled = false
+      btn.textContent = `设为公开（${docIds.length} 份）`
+    }
+  })
+  holder.appendChild(document.createTextNode('　'))
+  holder.appendChild(btn)
+}
+
+/**
  * 渲染待处理清单。
  *
  * @param {HTMLElement} container - 容器
@@ -878,7 +919,12 @@ export async function renderPending(container, opts = {}) {
       const keep = msg.textContent
       await renderPending(container, opts)
       const again = container.querySelector('#ingest-msg')
-      if (again) again.textContent = keep
+      if (again) {
+        again.textContent = keep
+        // ★ 默认私有策略：入库完必须马上给一条"转公开"的出路，
+        //   否则用户会以为又出故障了（上传成功、页面上却看不到）
+        if (ing.length) addPublishOffer(again, ing.map((r) => r.docId).filter(Boolean))
+      }
     } catch (err) {
       msg.className = 'pending-note err'
       msg.textContent = `入库失败：${err.message}`

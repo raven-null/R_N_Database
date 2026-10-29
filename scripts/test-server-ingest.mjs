@@ -249,9 +249,11 @@ async function main() {
       String(mdDetail.body?.data?.sourcePath ?? '').startsWith('upload://'),
       `sourcePath 记成 upload://（${mdDetail.body?.data?.sourcePath}）`,
     )
-    // 访客可见范围靠这个字段判定；缺了它 = 文档在线上对所有人隐藏
-    check(mdDetail.body?.data?.visibility === 'public',
-      `入库默认公开（visibility=${mdDetail.body?.data?.visibility}）`)
+    // 默认私有（DEFAULT_VISIBILITY）：公开必须是明确动作，不能是入库的副作用
+    check(mdDetail.body?.data?.visibility === 'private',
+      `入库默认私有（visibility=${mdDetail.body?.data?.visibility}）`)
+    check(mdDetail.body?.data?.schemaVersion === 2,
+      `元数据已带 schemaVersion（${mdDetail.body?.data?.schemaVersion}）`)
 
     /* ---------- 目录名参与分类（深层子目录也要生效）---------- */
     console.log('\n【目录名当命名提示】')
@@ -291,6 +293,22 @@ async function main() {
     check(over.status === 200, `limit 超上限被收敛而不是报错（HTTP ${over.status}）`)
     const wrongMethod = await api('/api/v1/inbox/ingest')
     check(wrongMethod.status === 400, `GET 被拒（HTTP ${wrongMethod.status}）`)
+
+    /* ---------- 批量转公开 ---------- */
+    console.log('\n【批量转公开】')
+    const pub = await api('/api/v1/docs/batch', {
+      method: 'POST',
+      body: { op: 'setVisibility', ids: [md.id], visibility: 'public' },
+    })
+    check(pub.status === 200, `setVisibility 成功（HTTP ${pub.status}）`)
+    const afterPub = await api(`/api/v1/docs/${md.id}`)
+    check(afterPub.body?.data?.visibility === 'public',
+      `可见性已变公开（${afterPub.body?.data?.visibility}）`)
+    const badVis = await api('/api/v1/docs/batch', {
+      method: 'POST',
+      body: { op: 'setVisibility', ids: [md.id], visibility: 'secret' },
+    })
+    check(badVis.status === 400, `非法 visibility 被拒（HTTP ${badVis.status}）`)
 
     /* ---------- 重建索引 ---------- */
     // 线上从没跑过 reindex 时，入库要能自己把索引建起来；万一索引已坏，

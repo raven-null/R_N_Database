@@ -50,6 +50,7 @@ import { renderMarkdownPage } from './markdown-view.mjs'
 import { applyDocChange } from './index-store.mjs'
 import { escHtml } from './source-view.mjs'
 import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
+import { normalizeDoc } from './doc-model.mjs'
 
 /** 单次最多处理多少份（再多会顶到函数时限）。 */
 const MAX_PER_CALL = 10
@@ -198,7 +199,10 @@ async function ingestOne(ctx) {
 
   // ---- 写入 ----
   const now = new Date().toISOString()
-  const newMeta = {
+  // ★ 一律过 normalizeDoc：可见性、状态、rev、数组形态这些"行为开关"
+  //   由模型统一给值。可见性默认 private（见 doc-model 里 DEFAULT_VISIBILITY 的说明），
+  //   这里**不**覆盖它 —— 公开必须是人明确点的动作。
+  const newMeta = normalizeDoc({
     id,
     sha256,
     title,
@@ -218,22 +222,20 @@ async function ingestOne(ctx) {
     categories: cls.categories,
     tags,
     summary: '',
-    // 未登录访客只能看 visibility === 'public' 的文档（routes/docs.mjs 的
-    // applyRoleFilter）。入库不写这个字段 = 文档只对管理员可见，站点上
-    // 看到的就是「0 份文档」—— 这个坑踩过一次，所以入库时显式给默认值。
-    visibility: 'public',
     classifySource: 'rules',
     needsReview: cls.categories.includes('未归类') || Boolean(extracted.error),
     aiError: null,
     hasText: Boolean(extracted.text),
     textChars: extracted.text?.length ?? 0,
+    textTruncated: Boolean(extracted.textTruncated),
+    pagesExtracted: extracted.pagesExtracted ?? null,
     extractError: extracted.error,
     previewKind,
     previewNote,
     // 服务端入库没有 webView（需要 jsdom/pagus）
     webView: null,
     ingestedBy: 'server',
-  }
+  })
 
   await ctx.filesStore.set(`${id}.${ext}`, buf)
   await ctx.metaStore.set(id, JSON.stringify(newMeta))

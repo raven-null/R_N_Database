@@ -197,9 +197,17 @@ export async function batchRoute(req, url) {
         next = patchMeta(oldMeta, { categories: cats.length ? [...new Set(cats)].slice(0, 3) : ['未归类'] }, 'batch')
       } else if (op === 'markReview') {
         next = patchMeta(oldMeta, { needsReview: true }, 'batch')
+      } else if (op === 'setVisibility') {
+        // 默认私有之后，「批量转公开」是最常用的动作之一：
+        // 一次上传十几份、一个文件夹整层公开，都靠它。
+        const v = String(body?.visibility ?? '')
+        if (v !== 'public' && v !== 'private') {
+          return badRequest('visibility 只能是 public 或 private', { req })
+        }
+        next = patchMeta(oldMeta, { visibility: v }, 'batch')
       } else {
         return badRequest(`未知操作：${op}`
-          + '（支持 addTags / removeTags / setCategory / markReview / delete）', { req })
+          + '（支持 addTags / removeTags / setCategory / setVisibility / markReview / delete）', { req })
       }
 
       updates.push({ oldMeta, newMeta: next })

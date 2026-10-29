@@ -26,21 +26,50 @@ import { ok, serverError } from './respond.mjs'
 import { getDocsStore, STORES } from './store.mjs'
 import { buildIndex } from './tokenize.mjs'
 import { writeIndex, readIndexMeta } from './index-store.mjs'
+import { SCHEMA_VERSION, migrateDoc } from './doc-model.mjs'
 import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 
 /** 单次重建最多处理多少份文档（再多会撞函数时限）。 */
 const MAX_DOCS = 2000
 
-/** 补写可见性时用的默认值。 */
-const DEFAULT_VISIBILITY = 'public'
+/** 补写可见性时用的默认值。
+ *
+ * ★ 注意这里是 `public` 而不是模型里的 `DEFAULT_VISIBILITY`（private）：
+ * 补写面对的是**历史文档**，它们本来就该是公开的，修数据不该改可见范围。
+ * 新建文档的默认值在 doc-model 里，是 private。
+ */
+const DEFAULT_VISIBILITY_BACKFILL = 'public'
+
+/**
+ * 把旧文档补到当前模型（保留一切已有取值）。
+ *
+ * 迁移语义：历史文档缺 `visibility` 视为 public —— 它们本来就是公开的，
+ * 迁移只补字段、不改可见范围。新建文档才吃 `DEFAULT_VISIBILITY`（private）。
+ *
+ * @param {object[]} metas - 全部元数据（会被就地修改）
+ * @returns {Promise<number>} 升级了多少份
+ */
+async function migrateAll(metas) {
+  const todo = metas.filter((m) => m.schemaVersion !== SCHEMA_VERSION)
+  if (todo.length === 0) return 0
+
+  const store = await getDocsStore(STORES.META)
+  for (const m of todo) {
+    const { doc } = migrateDoc(m)
+    // 就地替换（后续 buildIndex 用的是同一批对象）
+    for (const k of Object.keys(m)) delete m[k]
+    Object.assign(m, doc)
+    await store.set(m.id, JSON.stringify(doc))
+  }
+  return todo.length
+}
 
 /**
  * 补写缺失的 `visibility` 字段。
  *
  * 为什么单独做一件「补数据」的事：读接口按 `visibility === 'public'`
  * 过滤访客可见范围，而早期的入库流程没写这个字段 —— 结果就是元数据
- * 齐全、索引也在，站点上却一份文档都不显示。这种事只能靠一遍扫全库
- * 来修，顺手就在这里做了。
+ * 齐全、索引也在，站点上却一份文档都不显示。
  *
  * @param {object[]} metas - 全部元数据（会被就地修改）
  * @returns {Promise<number>} 补写了多少份
@@ -51,7 +80,7 @@ async function backfillVisibility(metas) {
 
   const store = await getDocsStore(STORES.META)
   for (const m of todo) {
-    m.visibility = DEFAULT_VISIBILITY
+    m.visibility = DEFAULT_VISIBILITY_BACKFILL
     await store.set(m.id, JSON.stringify(m))
   }
   return todo.length
@@ -108,6 +137,7 @@ export async function repairIndex(req, url) {
     }
 
     const visibilityFixed = await backfillVisibility(meta)
+    const migrated = await migrateAll(meta)
 
     const index = buildIndex(meta, (d) => texts.get(d.id) ?? '')
     const written = await writeIndex(index)
@@ -127,9 +157,12 @@ export async function repairIndex(req, url) {
       avgLength: Math.round(index.avgLength * 10) / 10,
       shards: written.shards,
       visibilityFixed,
+      migrated,
+      schemaVersion: SCHEMA_VERSION,
       version: after?.version ?? index.version,
       note: `已从 ${meta.length} 份元数据重建索引（${texts.size} 份有正文）`
         + (visibilityFixed > 0 ? `，补写可见性 ${visibilityFixed} 份` : '')
+        + (migrated > 0 ? `，升级模型 ${migrated} 份` : '')
         + '。',
     }, { req })
   } catch (err) {

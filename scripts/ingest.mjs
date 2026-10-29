@@ -40,6 +40,7 @@ import { convertToPdfDetailed, findLibreOffice as findSoffice, officeEngineStatu
 // 索引重建与 scripts/reindex.mjs 共用同一实现，避免两条路径产物不一致
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
+import { normalizeDoc } from '../netlify/functions/_lib/doc-model.mjs'
 
 const ROOT = process.cwd()
 const TAXONOMY_FILE = join(ROOT, 'config', 'taxonomy.json')
@@ -357,7 +358,9 @@ export async function ingestOne(filePath, ctx, override = {}) {
 
   // ---- 写入 ----
   const now = new Date().toISOString()
-  const meta = {
+  // ★ 一律过 normalizeDoc：可见性/状态/rev/数组形态由模型统一给值，
+  //   可见性默认 private（公开必须是人明确点的动作）
+  const meta = normalizeDoc({
     id,
     sha256: createHash('sha256').update(buf).digest('hex'),
     title: finalTitle,
@@ -382,14 +385,13 @@ export async function ingestOne(filePath, ctx, override = {}) {
     categories: cls.categories,
     tags: cls.tags,
     summary: cls.summary,
-    // 必须显式给：访客只看得见 visibility === 'public' 的文档，
-    // 缺这个字段在线上等于「对所有人隐藏」
-    visibility: 'public',
     classifySource: cls.source,
     needsReview: cls.needsReview,
     aiError: cls.aiError,
     hasText: Boolean(extracted.text),
     textChars: extracted.text?.length ?? 0,
+    textTruncated: Boolean(extracted.textTruncated),
+    pagesExtracted: extracted.pagesExtracted ?? null,
     extractError: extracted.error,
     previewKind,
     previewNote,
@@ -397,7 +399,7 @@ export async function ingestOne(filePath, ctx, override = {}) {
     webView,
     webViewNote: webViewNote || undefined,
     webViewStats: webViewStats || undefined,
-  }
+  })
 
   const filesStore = await store(STORES.FILES)
   const textStore = await store(STORES.TEXT)

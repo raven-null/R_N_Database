@@ -42,7 +42,8 @@
     "test:batch": "node scripts/test-batch-tags.mjs",
     "test:access": "node scripts/test-access.mjs",
     "test:export": "node scripts/test-export.mjs",
-    "doctor": "node scripts/doctor.mjs"
+    "doctor": "node scripts/doctor.mjs",
+    "test:model": "node scripts/test-model.mjs"
   },
   "devDependencies": {
     "@pagus-kit/core": "^0.1.1",

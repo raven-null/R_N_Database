@@ -124,6 +124,7 @@ export async function manifestRoute(req, url) {
         previewNote: d.previewNote ?? '',
         hasText: Boolean(d.hasText),
         needsReview: Boolean(d.needsReview),
+        visibility: d.visibility === 'public' ? 'public' : 'private',
         ingestedAt: d.ingestedAt,
         docCreatedAt: d.docCreatedAt,
         // 来源目录：库是扁平的，这一项让前端能画出「按目录浏览」的树。

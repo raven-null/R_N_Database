@@ -695,6 +695,22 @@ body.list-page {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
+/* 「私有」= 一枚低调的锁记。默认私有之后，访客为什么看不到必须一眼可辨，
+   所以它不做成警告色，只求"在但安静" */
+.lock {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 5px 1px;
+  border: 1px dashed color-mix(in srgb, currentColor 55%, transparent);
+  border-radius: 2px;
+  color: var(--ink-soft, currentColor);
+  font: 500 10.5px/1.7 var(--font-kai);
+  letter-spacing: 1px;
+  vertical-align: middle;
+  opacity: .72;
+  cursor: help;
+}
+
 /* 「待复查」= 一枚斜盖的朱印 */
 .flag {
   display: inline-block;

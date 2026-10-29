@@ -361,7 +361,7 @@ function docRow(doc) {
       <a class="doc-link" href="/view.html?id=${encodeURIComponent(doc.id)}">
         ${typeBadge(doc.type, doc.ext)}
         <div class="doc-main">
-          <div class="doc-title">${esc(doc.title)}${doc.needsReview ? '<span class="flag">待复查</span>' : ''}</div>
+          <div class="doc-title">${esc(doc.title)}${doc.needsReview ? '<span class="flag">待复查</span>' : ''}${doc.visibility === 'private' ? '<span class="lock" data-tip="私有：只有登录后能看到。点进详情可改为公开。" aria-label="私有">锁</span>' : ''}</div>
           ${doc.summary ? `<div class="doc-summary">${esc(doc.summary)}</div>` : ''}
           <div class="doc-meta">
             ${metaBits.map((b) => `<span>${b}</span>`).join('<i>·</i>')}
