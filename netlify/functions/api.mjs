@@ -16,6 +16,9 @@
  * @module netlify/functions/api
  */
 
+// 必须排在最前：线上 Functions 是 Node 20，pdfjs 等库要 Node 22+ 的 API
+import './_lib/polyfills.mjs'
+
 import { healthRoute } from './_lib/routes/health.mjs'
 import { docsRoute } from './_lib/routes/docs.mjs'
 import { searchRoute } from './_lib/routes/search.mjs'
