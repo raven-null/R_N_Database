@@ -22,6 +22,7 @@
     "check": "node scripts/check.mjs",
     "build": "node scripts/check.mjs",
     "probe": "node scripts/probe.mjs",
+    "link": "node scripts/connect-remote.mjs",
     "ingest": "node scripts/ingest.mjs",
     "reindex": "node scripts/reindex.mjs",
     "reclassify": "node scripts/reclassify.mjs",
