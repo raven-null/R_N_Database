@@ -249,6 +249,9 @@ async function main() {
       String(mdDetail.body?.data?.sourcePath ?? '').startsWith('upload://'),
       `sourcePath 记成 upload://（${mdDetail.body?.data?.sourcePath}）`,
     )
+    // 访客可见范围靠这个字段判定；缺了它 = 文档在线上对所有人隐藏
+    check(mdDetail.body?.data?.visibility === 'public',
+      `入库默认公开（visibility=${mdDetail.body?.data?.visibility}）`)
 
     /* ---------- 目录名参与分类（深层子目录也要生效）---------- */
     console.log('\n【目录名当命名提示】')
@@ -288,6 +291,26 @@ async function main() {
     check(over.status === 200, `limit 超上限被收敛而不是报错（HTTP ${over.status}）`)
     const wrongMethod = await api('/api/v1/inbox/ingest')
     check(wrongMethod.status === 400, `GET 被拒（HTTP ${wrongMethod.status}）`)
+
+    /* ---------- 重建索引 ---------- */
+    // 线上从没跑过 reindex 时，入库要能自己把索引建起来；万一索引已坏，
+    // 这个端点要从 META 全量修回来。两条路径都别依赖「先跑脚本」。
+    console.log('\n【重建索引】')
+    const repair = await api('/api/v1/index/repair', { method: 'POST' })
+    check(repair.status === 200, `POST 重建索引成功（HTTP ${repair.status}）`)
+    check((repair.body?.data?.docCount ?? 0) >= createdDocIds.size,
+      `重建覆盖了库里全部文档（docCount=${repair.body?.data?.docCount}）`)
+    check(repair.body?.data?.shards === 128, `写满 128 个分片（${repair.body?.data?.shards}）`)
+    check(typeof repair.body?.data?.version === 'string' && repair.body.data.version.length > 0,
+      '返回了索引版本号')
+    const afterRepair = await api(`/api/v1/search?q=${encodeURIComponent(MARK)}`)
+    check((afterRepair.body?.data?.items ?? []).some((i) => i.id === pdf.id),
+      '重建之后仍然搜得到'
+      + `（total=${afterRepair.body?.data?.total}）`)
+    const listed = await api('/api/v1/docs?limit=1')
+    check((listed.body?.data?.total ?? 0) >= createdDocIds.size, '重建之后列表读得出文档')
+    const repairedWrong = await api('/api/v1/index/repair')
+    check(repairedWrong.status === 400, `GET 被拒（HTTP ${repairedWrong.status}）`)
   } finally {
     // 删掉本轮入库的文档
     let removed = 0

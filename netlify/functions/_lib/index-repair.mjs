@@ -31,6 +31,32 @@ import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 /** 单次重建最多处理多少份文档（再多会撞函数时限）。 */
 const MAX_DOCS = 2000
 
+/** 补写可见性时用的默认值。 */
+const DEFAULT_VISIBILITY = 'public'
+
+/**
+ * 补写缺失的 `visibility` 字段。
+ *
+ * 为什么单独做一件「补数据」的事：读接口按 `visibility === 'public'`
+ * 过滤访客可见范围，而早期的入库流程没写这个字段 —— 结果就是元数据
+ * 齐全、索引也在，站点上却一份文档都不显示。这种事只能靠一遍扫全库
+ * 来修，顺手就在这里做了。
+ *
+ * @param {object[]} metas - 全部元数据（会被就地修改）
+ * @returns {Promise<number>} 补写了多少份
+ */
+async function backfillVisibility(metas) {
+  const todo = metas.filter((m) => m.visibility !== 'public' && m.visibility !== 'private')
+  if (todo.length === 0) return 0
+
+  const store = await getDocsStore(STORES.META)
+  for (const m of todo) {
+    m.visibility = DEFAULT_VISIBILITY
+    await store.set(m.id, JSON.stringify(m))
+  }
+  return todo.length
+}
+
 /**
  * 读出全部 META（不走索引的 docs 清单 —— 那份可能正是坏的）。
  *
@@ -81,6 +107,8 @@ export async function repairIndex(req, url) {
       texts.set(d.id, (t?.pages ?? []).join('\n'))
     }
 
+    const visibilityFixed = await backfillVisibility(meta)
+
     const index = buildIndex(meta, (d) => texts.get(d.id) ?? '')
     const written = await writeIndex(index)
 
@@ -98,8 +126,11 @@ export async function repairIndex(req, url) {
       termCount: index.termCount,
       avgLength: Math.round(index.avgLength * 10) / 10,
       shards: written.shards,
+      visibilityFixed,
       version: after?.version ?? index.version,
-      note: `已从 ${meta.length} 份元数据重建索引（${texts.size} 份有正文）。`,
+      note: `已从 ${meta.length} 份元数据重建索引（${texts.size} 份有正文）`
+        + (visibilityFixed > 0 ? `，补写可见性 ${visibilityFixed} 份` : '')
+        + '。',
     }, { req })
   } catch (err) {
     return serverError(err, 'index/repair', { req })

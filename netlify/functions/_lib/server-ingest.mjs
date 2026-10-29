@@ -207,6 +207,10 @@ async function ingestOne(ctx) {
     categories: cls.categories,
     tags,
     summary: '',
+    // 未登录访客只能看 visibility === 'public' 的文档（routes/docs.mjs 的
+    // applyRoleFilter）。入库不写这个字段 = 文档只对管理员可见，站点上
+    // 看到的就是「0 份文档」—— 这个坑踩过一次，所以入库时显式给默认值。
+    visibility: 'public',
     classifySource: 'rules',
     needsReview: cls.categories.includes('未归类') || Boolean(extracted.error),
     aiError: null,

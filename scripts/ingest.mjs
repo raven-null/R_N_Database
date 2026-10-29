@@ -382,6 +382,9 @@ export async function ingestOne(filePath, ctx, override = {}) {
     categories: cls.categories,
     tags: cls.tags,
     summary: cls.summary,
+    // 必须显式给：访客只看得见 visibility === 'public' 的文档，
+    // 缺这个字段在线上等于「对所有人隐藏」
+    visibility: 'public',
     classifySource: cls.source,
     needsReview: cls.needsReview,
     aiError: cls.aiError,
