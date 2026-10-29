@@ -36,7 +36,7 @@ export function mountEditor(container, opts) {
     <div class="editor">
       <div class="editor-head">
         <b>编辑元数据</b>
-        <span class="dim">改分类/标签/标题后索引会立即同步，「待复查」标记自动清除</span>
+        <button class="tip" type="button" data-tip="改分类 / 标签 / 标题后索引会立即同步，「待复查」标记会自动清除。">?</button>
       </div>
 
       <label class="field">
@@ -45,7 +45,7 @@ export function mountEditor(container, opts) {
       </label>
 
       <div class="field">
-        <span>分类<em>（可多选，来自受控词表）</em></span>
+        <span>分类<button class="tip" type="button" data-tip="可多选，取自受控词表（config/taxonomy.json）。">?</button></span>
         <div class="cat-picker">
           ${cats.map((c) => `
             <label class="cat-opt${selected.has(c.name) ? ' on' : ''}" data-cat="${esc(c.name)}">
@@ -56,7 +56,7 @@ export function mountEditor(container, opts) {
       </div>
 
       <label class="field">
-        <span>标签<em>（逗号分隔，允许新建）</em></span>
+        <span>标签<button class="tip" type="button" data-tip="逗号分隔；直接输一个新词就会新建标签。">?</button></span>
         <input id="ed-tags" type="text" value="${esc((doc.tags ?? []).join(', '))}">
       </label>
 
@@ -66,10 +66,10 @@ export function mountEditor(container, opts) {
       </label>
 
       <label class="field">
-        <span>可见性</span>
+        <span>可见性<button class="tip" type="button" data-tip="私有：只有持 admin / read 令牌的人能看到。&#10;公开：未登录访客也能看到。">?</button></span>
         <select id="ed-visibility">
-          <option value="private"${doc.visibility !== 'public' ? ' selected' : ''}>私有（仅 admin/read 令牌可见）</option>
-          <option value="public"${doc.visibility === 'public' ? ' selected' : ''}>公开（guest 令牌也能看到）</option>
+          <option value="private"${doc.visibility !== 'public' ? ' selected' : ''}>私有</option>
+          <option value="public"${doc.visibility === 'public' ? ' selected' : ''}>公开</option>
         </select>
       </label>
 

@@ -27,6 +27,7 @@ import { esc, fmtSize, fmtDate, typeInfo, param, isEditableType } from './util.j
 import { mountEditor, canEditNow } from './edit.js'
 import { mountCodeEditor } from './code-editor.js'
 import { mountSheet } from './sheet-view.js'
+import { setTip } from './hint.js'
 
 const el = {
   title: document.getElementById('doc-title'),
@@ -39,6 +40,7 @@ const el = {
   panelActions: document.getElementById('panel-actions'),
   notice: document.getElementById('notice'),
   editor: document.getElementById('editor-slot'),
+  pageTip: document.getElementById('tip-page'),
 }
 
 /** 当前文档，供面板/编辑器复用。 */
@@ -103,7 +105,7 @@ function editableContent(doc) {
 function renderHeader(doc) {
   document.title = `${doc.title} · R_N 资料库`
   el.title.textContent = doc.title
-  el.title.title = doc.title
+  el.title.setAttribute('aria-label', doc.title)
 
   const bits = [
     `<b>${esc(typeInfo(doc.type, doc.ext).label)}</b>`,
@@ -144,7 +146,7 @@ function renderActions(doc, canEdit) {
     ${views.length > 1 ? `
       <div class="mode-switch" role="group" aria-label="查看方式">
         ${views.map((v) => `<button data-view="${v.id}" class="${v.id === activeView ? 'on' : ''}"
-          title="${esc(v.hint ? `${v.label}（${v.hint}）` : v.label)}">${esc(v.label)}${v.hint ? '<sup>*</sup>' : ''}</button>`).join('')}
+          aria-label="${esc(v.hint ? `${v.label}（${v.hint}）` : v.label)}"${v.hint ? ` data-tip="${esc(`${v.label}：${v.hint}`)}"` : ''}>${esc(v.label)}${v.hint ? '<sup>*</sup>' : ''}</button>`).join('')}
       </div>` : ''}
     <a class="btn primary" href="${esc(authedUrl(`/api/v1/docs/${doc.id}/file`))}" download>下载</a>
     <button class="btn ghost" id="btn-info" aria-expanded="false">详情</button>
@@ -270,6 +272,8 @@ function closeEditor() {
 function renderPreview(doc) {
   const q = param('q')
   el.notice.innerHTML = ''
+  // 说明一律进顶栏那个问号，页面上不铺任何提示条
+  const tips = ['「详情」展开元信息、摘要与标签；「下载」取原件。']
 
   if (doc.extractError) {
     el.notice.innerHTML = `<div class="notice warn">正文抽取有问题：${esc(doc.extractError)}</div>`
@@ -278,16 +282,18 @@ function renderPreview(doc) {
   // ---- 表格视图：原生渲染，不走 iframe ----
   if (activeView === 'sheet' && doc.webView === 'sheet') {
     mountSheet(el.frame, { doc })
-    el.notice.innerHTML += '<div class="notice">表格视图（可直接滚动、选中复制；想看原样请切「原始版式」）</div>'
+    tips.push('表格视图：可直接滚动、选中复制；想看原样请切「原始版式」。')
+    setTip(el.pageTip, tips)
     return
   }
 
   if (!doc.previewKind || doc.previewKind === 'none') {
     el.frame.innerHTML = `<div class="empty">
-      这份文档没有可用的预览件。<br>
-      <span class="dim">常见原因：旧版 Office 格式（.doc/.xls/.ppt），或扫描件没有可提取的文本。<br>
-      可以点上方「下载」用本地软件打开。</span>
+      这份文档没有可用的预览件
+      <button class="tip" type="button" data-tip="常见原因：旧版 Office 格式（.doc / .xls / .ppt），或扫描件没有可提取的文字。
+可以点上方「下载」用本地软件打开。">?</button>
     </div>`
+    setTip(el.pageTip, tips)
     return
   }
 
@@ -299,29 +305,27 @@ function renderPreview(doc) {
 
   if (usePdfRenderer) {
     el.frame.innerHTML = `<iframe class="pdf" src="${esc(src)}" title="文档预览"></iframe>`
-    const hints = []
-    if (doc.previewNote) hints.push(esc(doc.previewNote))
-    if (doc.webView) hints.push('另一档是网页视图，手机上看更舒服')
-    if (q) hints.push(`按 Ctrl+F 可搜索「${esc(q)}」`)
-    if (hints.length) el.notice.innerHTML += `<div class="notice">${hints.join('　·　')}</div>`
+    if (doc.previewNote) tips.push(doc.previewNote)
+    if (doc.webView) tips.push('另一档是网页视图，手机上看更舒服。')
+    if (q) tips.push(`按 Ctrl+F 可搜索「${q}」。`)
+    setTip(el.pageTip, tips)
     return
   }
 
   // 网页视图 / Markdown / HTML / 代码 / 文本预览：都是 HTML 文档
   el.frame.innerHTML = `<iframe class="html" src="${esc(src)}" title="文档预览" sandbox="allow-same-origin"></iframe>`
 
-  const hints = []
   if (isWebView) {
-    hints.push(doc.webView === 'pptx' ? '网页版（实验）：字体度量与换行可能与 PowerPoint 略有差异' : '网页版：可复制文字、手机上自适应')
-    if (doc.webViewNote) hints.push(esc(doc.webViewNote))
+    tips.push(doc.webView === 'pptx' ? '网页版（实验）：字体度量与换行可能与 PowerPoint 略有差异。' : '网页版：可复制文字、手机上自适应。')
+    if (doc.webViewNote) tips.push(doc.webViewNote)
   }
   if (doc.previewKind === 'markdown') {
-    hints.push(activeView === 'source' ? '源码视图（等宽 + 行号）' : '渲染视图')
+    tips.push(activeView === 'source' ? '源码视图（等宽 + 行号）。' : '渲染视图。')
   }
-  if (doc.previewKind === 'code') hints.push('代码预览（等宽 + 行号）')
-  if (doc.previewNote && !isWebView) hints.push(esc(doc.previewNote))
-  if (/HTML 降级/.test(doc.previewNote ?? '')) hints.push('安装 LibreOffice 可转为保真度更高的 PDF 预览')
-  if (hints.length) el.notice.innerHTML = `<div class="notice">${hints.join('　·　')}</div>`
+  if (doc.previewKind === 'code') tips.push('代码预览（等宽 + 行号）。')
+  if (doc.previewNote && !isWebView) tips.push(doc.previewNote)
+  if (/HTML 降级/.test(doc.previewNote ?? '')) tips.push('安装 LibreOffice 可转为保真度更高的 PDF 预览。')
+  setTip(el.pageTip, tips)
 }
 
 /**

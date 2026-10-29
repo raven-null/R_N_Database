@@ -92,7 +92,7 @@ export function openQuickTag(doc, anchor, opts = {}) {
     <div class="popover-head">${esc(doc.title).slice(0, 40)}</div>
     <div class="popover-tags" id="qt-list"></div>
     <div class="popover-row">
-      <input id="qt-input" type="text" placeholder="输入标签后回车" autocomplete="off">
+      <input id="qt-input" type="text" placeholder="标签" aria-label="标签名，回车添加，多个用逗号分隔" autocomplete="off">
     </div>
     <div class="popover-sugs" id="qt-sugs"></div>`
 
@@ -127,7 +127,7 @@ export function openQuickTag(doc, anchor, opts = {}) {
   function draw() {
     listEl.innerHTML = tags.length
       ? tags.map((t) => `<span class="tag removable" data-tag="${esc(t)}">${esc(t)}<b>×</b></span>`).join('')
-      : '<span class="dim">还没有标签</span>'
+      : '<span class="dim">尚无</span>'
 
     listEl.querySelectorAll('[data-tag]').forEach((el) => {
       el.addEventListener('click', async () => {
@@ -140,7 +140,7 @@ export function openQuickTag(doc, anchor, opts = {}) {
     const used = new Set(tags)
     const sugs = (opts.suggestions ?? []).filter((s) => !used.has(s)).slice(0, 8)
     sugEl.innerHTML = sugs.length
-      ? `<span class="dim">常用：</span>${sugs.map((s) => `<span class="tag clickable" data-sug="${esc(s)}">${esc(s)}</span>`).join('')}`
+      ? sugs.map((s) => `<span class="tag clickable" data-sug="${esc(s)}">${esc(s)}</span>`).join('')
       : ''
 
     sugEl.querySelectorAll('[data-sug]').forEach((el) => {
@@ -197,13 +197,11 @@ export async function openTagManager(opts = {}) {
       <div class="modal-head">
         <b>标签管理</b>
         <span class="dim">共 ${stats.total} 个标签 · ${stats.docCount} 份文档</span>
+        <button class="tip" type="button" data-tip="重命名与合并会改掉所有用到该标签的文档；删除只是把标签从文档上摘掉，不会删文档。">?</button>
         <span class="modal-spacer"></span>
         <button class="btn ghost" data-close>关闭</button>
       </div>
       <div class="modal-body" id="tm-body"></div>
-      <div class="modal-foot dim">
-        重命名与合并会**改掉所有用到该标签的文档**；删除只是把标签从文档上摘掉，不会删文档。
-      </div>
     </div>`
 
   document.body.appendChild(mask)
@@ -249,9 +247,10 @@ export async function openTagManager(opts = {}) {
       </table>
       ${stats.unused.length ? `
         <div class="modal-note">
-          <b>词表里定义但没人用的标签</b>（${stats.unused.length} 个）：
+          <b>词表里定义但没人用的标签</b>（${stats.unused.length} 个）
+          <button class="tip" type="button" data-tip="这些还没被任何文档使用，可在 config/taxonomy.json 里决定保留或清理。">?</button>
+          <br>
           ${stats.unused.map((u) => `<span class="tag dimtag">${esc(u)}</span>`).join('')}
-          <div class="dim">这些还没被任何文档使用，可在 config/taxonomy.json 里决定保留或清理。</div>
         </div>` : ''}`
 
     body.querySelectorAll('[data-act]').forEach((btn) => {

@@ -374,7 +374,8 @@ async function testViewPage() {
       `实际 iframe: ${document.querySelector('#frame iframe')?.className ?? '无'}`,
     )
 
-    const notice = document.getElementById('notice')?.textContent ?? ''
+    // 说明全部收在顶栏的「?」里（页面不摆提示条），所以来源说明读 data-tip
+    const notice = document.getElementById('tip-page')?.getAttribute('data-tip') ?? ''
     // 引擎名会变（Office 桌面引擎 / LibreOffice / HTML 降级），
     // 断言只要求「说明了预览件来源」，不写死具体引擎
     check(

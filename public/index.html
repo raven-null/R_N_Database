@@ -6,18 +6,21 @@
   <title>R_N 资料库</title>
   <!-- CSS/JS 带 ?v= 版本号：netlify.toml 对 /css/* /js/* 设了 immutable 长缓存，
        改版时必须同步改这里的 v 值，否则客户端拿不到新文件。 -->
-  <link rel="stylesheet" href="/css/style.css?v=0.7.1">
+  <link rel="stylesheet" href="/css/style.css?v=0.8.0">
 </head>
 <body class="list-page">
+  <!-- 页面上不摆任何说明文字：能解释的东西全收在 ? 里（悬停 / 聚焦查看）。 -->
   <header class="topbar">
     <a class="brand" href="/">R_N <span>资料库</span></a>
 
     <div class="search-wrap">
-      <input id="search" type="search" placeholder="筛选标题 / 标签 / 分类 / 拼音　·　按回车全文检索正文" autocomplete="off">
-      <span class="kbd-hint">回车=查正文</span>
+      <span class="search-mark" aria-hidden="true">检</span>
+      <input id="search" type="search" aria-label="检索题名、原名、摘要、作者、标签、分类或拼音" autocomplete="off">
+      <button class="tip" type="button" id="tip-search" data-tip="检索题名 / 原名 / 摘要 / 作者 / 标签 / 分类，也认拼音（如 jlxz → 简历第一版）。
+按回车查正文：全文检索 PDF、Office、文本里抽出的文字。">?</button>
     </div>
 
-    <select id="sort" title="排序方式">
+    <select id="sort" aria-label="排序方式">
       <option value="recent">最近入库</option>
       <option value="oldest">最早入库</option>
       <option value="title">按标题</option>
@@ -25,9 +28,13 @@
     </select>
 
     <div class="topbar-actions">
-      <button class="btn ghost" id="btn-select" title="多选后可批量加标签、改分类">选择</button>
-      <button class="btn ghost" id="btn-upload" title="上传文件到暂存区（文件/文件夹也可以直接拖进来）">上传</button>
-      <button class="btn ghost" id="btn-upload-dir" title="上传整个文件夹：保留目录结构，自动跳过系统文件、不支持的类型与超大文件">传文件夹</button>
+      <button class="btn ghost" id="btn-select">选择</button>
+      <button class="btn ghost" id="btn-upload">上传</button>
+      <button class="btn ghost" id="btn-upload-dir">传文件夹</button>
+      <button class="tip" type="button" id="tip-upload" data-tip="上传把原件存进暂存区，入库要在本地跑命令。
+支持 PDF / Office / Markdown / 纯文本 / 常见代码后缀，单个不超过 20MB。
+文件或文件夹可以直接拖进右侧列表。
+「选择」进入批量模式：加标签、改分类、标待复查、删除。">?</button>
     </div>
 
     <div id="auth-area" class="auth-area"></div>
@@ -43,6 +50,7 @@
     <main class="main">
       <div class="list-head">
         <span id="stats" class="stats">加载中…</span>
+        <button class="tip" type="button" id="tip-list" hidden>?</button>
       </div>
       <div id="pending" class="pending"></div>
       <div id="results" class="results">
@@ -54,6 +62,6 @@
   <!-- 批量操作栏：底部浮出，仅在选择模式显示 -->
   <div id="selbar" class="selbar" hidden></div>
 
-  <script type="module" src="/js/list.js?v=0.7.1"></script>
+  <script type="module" src="/js/list.js?v=0.8.0"></script>
 </body>
 </html>

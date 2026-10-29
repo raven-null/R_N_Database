@@ -4,15 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>文档 · R_N 资料库</title>
-  <link rel="stylesheet" href="/css/style.css?v=0.7.0">
+  <link rel="stylesheet" href="/css/style.css?v=0.8.0">
 </head>
 <body class="view-page">
-  <!-- 阅读页刻意做成「文档优先」：
-       顶栏只有返回 / 标题 / 下载 / 详情开关，其余信息收进可折叠面板，
-       文档本身占满剩余的全部视口高度。 -->
+  <!-- 阅读页「文档优先」：顶栏只有返回 / 标题 / 详情 / 下载，
+       其余信息收进可折叠面板，文档本身占满剩余全部视口高度。
+       各类说明一律不落在页面上，收进「?」。 -->
   <header class="view-topbar">
-    <a class="icon-btn" href="/index.html" title="返回列表">←</a>
+    <a class="icon-btn" href="/index.html" aria-label="返回列表">←</a>
     <h1 id="doc-title">加载中…</h1>
+    <button class="tip" type="button" id="tip-page" hidden>?</button>
     <div id="actions" class="actions"></div>
   </header>
 
@@ -32,6 +33,6 @@
     <div class="empty">正在加载预览…</div>
   </div>
 
-  <script type="module" src="/js/view.js?v=0.7.0"></script>
+  <script type="module" src="/js/view.js?v=0.8.0"></script>
 </body>
 </html>

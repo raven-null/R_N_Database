@@ -72,13 +72,13 @@ export async function mountCodeEditor(container, opts) {
     <div class="editor code-editor">
       <div class="editor-head">
         <b>编辑内容</b>
-        <span class="dim">${esc(label)} · 保存后立即重渲染预览并同步检索索引</span>
+        <button class="tip" type="button" data-tip="${esc(label)} 原件直接改写。&#10;保存后会重渲染预览件，并用新旧两版正文增量更新检索索引。">?</button>
       </div>
 
       <div class="code-edit-bar">
-        <span class="dim">Tab 插入 ${INDENT.length} 个空格 · Shift+Tab 反缩进 · Ctrl/⌘+S 保存</span>
-        <span class="spacer"></span>
         <span class="dim" id="ce-stat">正在读取原件…</span>
+        <span class="spacer"></span>
+        <button class="tip" type="button" data-tip="Tab 插入 ${INDENT.length} 个空格&#10;Shift+Tab 反缩进&#10;Ctrl / ⌘ + S 保存">?</button>
       </div>
 
       <textarea id="ce-text" class="code-edit" spellcheck="false"

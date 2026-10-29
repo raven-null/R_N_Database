@@ -377,9 +377,8 @@ export function mountUpload(opts) {
       banner.innerHTML = `<div class="banner warn">
         <b>没有可上传的文件</b>${sourceLabel ? `（${esc(sourceLabel)}）` : ''}
         ${skipLines.map((l) => `<br>· ${l}`).join('')}
-        <br><br><span class="dim">支持的格式见「上传」按钮的提示；
-        更大的文件或整批大量文件请用命令行：<code>node scripts/ingest.mjs "目录"</code>
-        （直写存储，没有体积与数量限制）</span>
+        <br><br>更大的文件或整批大量文件请用命令行：
+        <code>node scripts/ingest.mjs "目录"</code>
       </div>`
       return {
         uploaded: 0,
@@ -530,12 +529,12 @@ export function mountUpload(opts) {
 
     // 暂存区在哪，取决于你是从本地 dev-server 还是线上站点上传的
     const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname)
-    const staging = isLocal
-      ? '本地暂存区</b>（.local-data/doc-inbox/）'
-      : '线上暂存区</b>（Netlify Blobs）'
+    const stagingName = isLocal
+      ? '本地暂存区 .local-data/doc-inbox/'
+      : '线上暂存区（Netlify Blobs）'
     const stagingHint = isLocal
       ? '本地暂存区直接读得到，不需要额外配置。'
-      : '需要在项目根目录的 <code>.env</code> 里配好 <code>DOCS_STORE_MODE=remote</code>、<code>SITE_ID</code> 与 <code>NETLIFY_ACCESS_TOKEN</code>。'
+      : '线上暂存区需要在项目根目录的 .env 里配好 DOCS_STORE_MODE=remote、SITE_ID 与 NETLIFY_ACCESS_TOKEN。'
 
     // 增量同步的结果汇总：说清「新增多少、替换多少、跳过了什么」
     const planLines = []
@@ -552,9 +551,8 @@ export function mountUpload(opts) {
     if (planStats?.missing?.length) {
       const sample = planStats.missing.slice(0, 5).map((m) => esc(m.path)).join('、')
       planLines.push(
-        `库里另有 ${planStats.missing.length} 份文档在这个目录下、但这次没出现（可能被删或改名）：`
-        + `${sample}${planStats.missing.length > 5 ? ' …' : ''}`
-        + '<br><span class="dim">它们**不会**被自动删除，需要的话到列表页手动删。</span>',
+        `库里另有 ${planStats.missing.length} 份文档在这个目录下、但这次没出现（可能被删或改名，不会自动删除）：`
+        + `${sample}${planStats.missing.length > 5 ? ' …' : ''}`,
       )
     }
 
@@ -571,17 +569,8 @@ export function mountUpload(opts) {
       ${failed.length > 8 ? `<br>✗ 另有 ${failed.length - 8} 个失败` : ''}
       ${dupInLib.length ? `<br>· ${dupInLib.length} 个库里已有同样内容，入库时会自动去重` : ''}
       ${dupPending.length ? `<br>· ${dupPending.length} 个暂存区已有同样内容` : ''}
-      <br><br>
-      ${nothingToSend
-    ? '<span class="dim">没有任何文件需要上传，所以暂存区没有变化。</span>'
-    : `<b>下一步</b>：文件已存进${staging}，尚未入库。
-      在本地运行：<br>
-      <code>node scripts/process-pending.mjs</code>
-      <br><span class="dim">
-        ${stagingHint}
-        <br>重排、抽正文、Office 转 PDF、分类打标 —— 这些重活必须在本地跑。
-        <b>已改动的文件会按路径替换旧版本</b>，不会变成两份。
-      </span>`}
+      ${nothingToSend ? '' : `<br><br>尚未入库，在本地运行 <code>node scripts/process-pending.mjs</code>
+      <button class="tip" type="button" data-tip="文件已存进${esc(stagingName)}。&#10;${esc(stagingHint)}&#10;重排、抽正文、Office 转 PDF、分类打标这些重活只能在本地跑。&#10;已改动的文件会按路径替换旧版本，不会变成两份。">?</button>`}
       <br><br><button class="btn ghost" id="up-dismiss">知道了</button>
     </div>`
 
@@ -620,7 +609,7 @@ export function mountUpload(opts) {
   async function handleDataTransfer(dt) {
     const items = await collectFromDataTransfer(dt).catch(() => [])
     if (items.length === 0) {
-      banner.innerHTML = '<div class="banner warn">没有读到任何文件。若拖的是文件夹，请用「传文件夹」按钮选择。</div>'
+      banner.innerHTML = '<div class="banner warn">没有读到任何文件；文件夹请用「传文件夹」按钮选。</div>'
       return { uploaded: 0, failed: 0, cancelled: false, skipped: {}, empty: true }
     }
     const roots = [...new Set(items.map((it) => it.relPath.split('/')[0]))]
@@ -714,7 +703,8 @@ export async function renderPending(container, opts = {}) {
   container.innerHTML = `
     <div class="pending-head">
       <b>待入库 ${data.total} 份</b>
-      <span class="dim">跑 <code>node scripts/process-pending.mjs</code> 完成</span>
+      <code>node scripts/process-pending.mjs</code>
+      <button class="tip" type="button" data-tip="上传只把原件存进暂存区；重排、抽正文、转 PDF、分类打标都要在本地跑这条命令完成。&#10;已改动的文件会按路径替换旧版本，不会变成两份。">?</button>
     </div>
     <div class="pending-list">
       ${data.items.map((it) => `
@@ -727,7 +717,7 @@ export async function renderPending(container, opts = {}) {
               ${fmtSize(it.size)}<i>·</i>${fmtDate(it.uploadedAt)}
             </div>
           </div>
-          <button class="pending-del" data-del="${esc(it.id)}" title="从暂存区移除">移除</button>
+          <button class="pending-del" data-del="${esc(it.id)}" aria-label="从暂存区移除">移除</button>
         </div>`).join('')}
     </div>`
 

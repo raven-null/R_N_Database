@@ -110,8 +110,7 @@ export function mountSelect(opts) {
     bar.innerHTML = `
       <div class="selbar-inner">
         <span class="selbar-count">已选 <b>${n}</b> 份</span>
-
-        ${n === 0 ? '<span class="dim">勾选文档后可批量操作</span>' : ''}
+        <button class="tip" type="button" data-tip="批量操作会直接改写选中文档的元数据并同步检索索引。&#10;「改分类」是整体替换，「加 / 删标签」只动标签，「删除」连原件一起删且不可撤销。">?</button>
 
         <div class="selbar-actions">
           <button class="btn" data-op="add" ${n ? '' : 'disabled'}>加标签</button>
@@ -147,25 +146,25 @@ export function mountSelect(opts) {
       const isAdd = mode === 'add'
       panel.innerHTML = `
         <div class="selbar-row">
-          <input id="selbar-tags" type="text" placeholder="标签名，多个用逗号分隔"
+          <input id="selbar-tags" type="text" placeholder="标签" aria-label="标签名，多个用逗号分隔"
                  autocomplete="off">
           <button class="btn primary" id="selbar-go">${isAdd ? '添加' : '移除'}</button>
           <button class="btn ghost" id="selbar-cancel">取消</button>
-        </div>
-        <div class="dim">${isAdd
-          ? '会给选中的每一份加上这些标签（已存在的不会重复）'
-          : '会从选中的每一份里去掉这些标签'}</div>`
+          <button class="tip" type="button" data-tip="${isAdd
+    ? '给选中的每一份加上这些标签，已存在的不重复。多个标签用逗号分隔。'
+    : '从选中的每一份里去掉这些标签。多个标签用逗号分隔。'}">?</button>
+        </div>`
     } else if (mode === 'category') {
       const cats = (opts.taxonomy?.categories ?? []).filter((c) => c.id !== 'other')
       panel.innerHTML = `
         <div class="selbar-row">
-          <select id="selbar-cat">
+          <select id="selbar-cat" aria-label="目标分类">
             ${cats.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')}
           </select>
           <button class="btn primary" id="selbar-go">设为该分类</button>
           <button class="btn ghost" id="selbar-cancel">取消</button>
-        </div>
-        <div class="dim">会把选中文档的分类**整体替换**为所选分类</div>`
+          <button class="tip" type="button" data-tip="会把选中文档的分类整体替换为所选分类。">?</button>
+        </div>`
     }
 
     panel.querySelector('#selbar-cancel')?.addEventListener('click', () => {

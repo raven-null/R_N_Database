@@ -14,6 +14,7 @@ import { esc, fmtSize, fmtDate, typeBadge, debounce, looksLikePinyin, matchesPin
 import { mountSelect } from './select.js'
 import { mountUpload, renderPending } from './upload.js'
 import { openQuickTag, openTagManager } from './tags.js'
+import { setTip } from './hint.js'
 
 /** 应用状态。 */
 const state = {
@@ -54,6 +55,7 @@ const el = {
   btnSelect: document.getElementById('btn-select'),
   btnUpload: document.getElementById('btn-upload'),
   btnUploadDir: document.getElementById('btn-upload-dir'),
+  tipList: document.getElementById('tip-list'),
 }
 
 /* ============================================================
@@ -126,7 +128,9 @@ function renderFacets(docs) {
 
   el.facets.innerHTML = `
     <section class="facet">
-      <h3>分类</h3>
+      <h3>分类
+        <button class="tip" type="button" data-tip="受控词表里的分类，可多选。分类由入库时自动判定，判错了到阅读页「详情 → 编辑元数据」修正。">?</button>
+      </h3>
       <div class="chips">
         ${chip('全部', docs.length, !state.category, 'data-facet="category" data-value=""')}
         ${cats.map(([name, n]) => chip(name, n, state.category === name, `data-facet="category" data-value="${esc(name)}"`)).join('')}
@@ -135,14 +139,18 @@ function renderFacets(docs) {
 
     ${reviewCount > 0 ? `
     <section class="facet">
-      <h3>待处理</h3>
+      <h3>待处理
+        <button class="tip" type="button" data-tip="机器拿不准的文档：分类置信度低，或正文抽取有问题。改好分类或内容后标记会自动清除。">?</button>
+      </h3>
       <div class="chips">
         ${chip('需要复查', reviewCount, state.reviewOnly, 'data-facet="review" data-value="1"')}
       </div>
     </section>` : ''}
 
     <section class="facet">
-      <h3>格式</h3>
+      <h3>格式
+        <button class="tip" type="button" data-tip="按文件类型筛选。代码一类显示真实后缀（TS / PY / JSON …），方便一眼分辨。">?</button>
+      </h3>
       <div class="chips">
         ${Object.entries(typeCount).sort((a, b) => b[1] - a[1])
           .map(([t, n]) => chip(t.toUpperCase(), n, state.type === t, `data-facet="type" data-value="${esc(t)}"`)).join('')}
@@ -150,11 +158,14 @@ function renderFacets(docs) {
     </section>
 
     <section class="facet">
-      <h3>标签 <button class="facet-act" id="btn-tags" title="重命名 / 合并 / 删除标签">管理</button></h3>
+      <h3>标签
+        <button class="tip" type="button" data-tip="标签是自由词，比分类更细。点「管理」可以重命名、合并同义标签、删除全库标签。">?</button>
+        <button class="facet-act" id="btn-tags" data-tip="重命名 / 合并 / 删除标签">管理</button>
+      </h3>
       <div class="chips">
         ${tags.length
           ? tags.map(([name, n]) => chip(name, n, state.tag === name, `data-facet="tag" data-value="${esc(name)}"`)).join('')
-          : '<span class="dim">还没有标签</span>'}
+          : '<span class="dim">尚无</span>'}
       </div>
     </section>
   `
@@ -211,7 +222,7 @@ function docRow(doc) {
           ${tags ? `<div class="doc-tags">${tags}</div>` : ''}
         </div>
       </a>
-      <button class="quick-tag" data-quick="${esc(doc.id)}" title="快速打标签">＋标签</button>
+      <button class="quick-tag" data-quick="${esc(doc.id)}" aria-label="快速打标签">＋标签</button>
       <span class="go">打开 →</span>
     </div>`
 }
@@ -223,8 +234,8 @@ function docRow(doc) {
  */
 function renderDeepResults(result) {
   if (!result.items?.length) {
-    return `<div class="empty">全文检索没有命中「${esc(result.query)}」的正文。<br>
-      <span class="dim">换个词试试，或用左侧分类浏览。</span></div>`
+    return `<div class="empty">全文检索没有命中「${esc(result.query)}」的正文
+      <button class="tip" type="button" data-tip="换个词试试，或用左侧分类浏览。清空检索框即回到列表。">?</button></div>`
   }
 
   return `<div class="deep-note">全文检索「${esc(result.query)}」命中 ${result.total} 份（含正文）</div>`
@@ -321,11 +332,11 @@ function render() {
 
   if (filtered.length === 0) {
     el.results.innerHTML = docs.length === 0
-      ? `<div class="empty">资料库还是空的。<br>
-          <span class="dim">点右上角「上传」传文件，或把文档放进 <code>inbox/</code> 后跑：</span>
+      ? `<div class="empty">尚未入库文档
+          <button class="tip" type="button" data-tip="点右上角「上传」传文件，或把文档放进 inbox/ 后再在本地跑下面的命令。">?</button>
           <pre class="cmd">node scripts/ingest.mjs</pre></div>`
-      : `<div class="empty">没有符合当前筛选条件的文档。<br>
-          <span class="dim">试试清空筛选条件。</span></div>`
+      : `<div class="empty">没有符合当前筛选条件的文档
+          <button class="tip" type="button" data-tip="把左侧已选中的分类 / 格式 / 标签再点一下取消，或清空检索框。">?</button></div>`
     el.stats.textContent = `0 / ${docs.length} 份`
     sel?.setVisible([])
     return
@@ -372,10 +383,9 @@ async function renderAuth() {
   // 线上未配密码：不是「全站拒绝」，而是「只能看公开文档 + 谁都不能上传」
   if (!status.configured) {
     el.banner.innerHTML = `<div class="banner warn">
-      服务端尚未配置访问密码。<br>
-      <span class="dim">现在未登录访客只能看到标记为「公开」的文档（默认全部私有，
-      所以可能什么也没有），且任何人都无法上传或修改。
-      要启用完整功能，请在 Netlify 环境变量里设置 ADMIN_TOKEN 后<b>重新部署</b>。</span>
+      <b>服务端尚未配置访问密码</b>
+      <button class="tip" type="button" data-tip="未登录访客只能看到标记为「公开」的文档（默认全部私有，所以可能什么也没有），且任何人都无法上传或修改。
+启用完整功能：在 Netlify 环境变量里设置 ADMIN_TOKEN 后重新部署。">?</button>
     </div>`
   }
 
@@ -500,7 +510,7 @@ async function main() {
     el.btnUpload.addEventListener('click', () => {
       if (confirm('上传需要登录。现在去登录？')) showLoginDialog()
     })
-    el.btnUpload.title = '上传需要登录'
+    setTip(el.btnUpload, '上传需要登录')
     if (el.btnUploadDir) {
       el.btnUploadDir.hidden = true   // 未登录时不必留一个点了也没用的按钮
     }
@@ -510,20 +520,21 @@ async function main() {
     state.manifest = await loadManifest()
   } catch (err) {
     if (err instanceof ApiError && err.code === 'UNAUTHORIZED') {
-      el.results.innerHTML = `<div class="empty">需要访问令牌。<br>
-        <span class="dim">点击右上角「登录」输入访问密码。</span></div>`
+      el.results.innerHTML = `<div class="empty">需要访问令牌
+        <button class="tip" type="button" data-tip="点右上角「登录」输入访问密码即可。">?</button></div>`
       return
     }
-    el.results.innerHTML = `<div class="empty">加载失败：${esc(err.message)}</div>`
+    el.results.innerHTML = `<div class="empty">载入失败：${esc(err.message)}</div>`
     return
   }
 
   render()
 
-  // 未登录时说明「你看到的是公开文档」，避免误以为资料丢了
-  if (!canWrite) {
-    el.stats.textContent += '　·　未登录，只显示已标记公开的文档'
-  }
+  // 份数的含义、以及未登录时能看见什么 —— 都放进问号里，不占版面
+  setTip(el.tipList, [
+    '份数 = 当前筛选命中 / 全库总数。',
+    canWrite ? null : '未登录：只能看到标记为「公开」的文档，登录后才能上传与修改。',
+  ])
 }
 
 /**
