@@ -57,6 +57,7 @@ const el = {
   pending: document.getElementById('pending'),
   selbar: document.getElementById('selbar'),
   btnSelect: document.getElementById('btn-select'),
+  btnNote: document.getElementById('btn-note'),
   btnUpload: document.getElementById('btn-upload'),
   btnUploadDir: document.getElementById('btn-upload-dir'),
   tipList: document.getElementById('tip-list'),
@@ -714,6 +715,49 @@ async function runDeepSearch() {
 }
 
 /**
+ * 新建一篇 Markdown 笔记，然后跳到阅读页直接开始写。
+ *
+ * 落到哪儿：当前侧栏选中的目录；没选就落在根目录。
+ * 标题先问一下 —— 有个默认标题，比一个"未命名"的空壳好得多。
+ *
+ * @returns {Promise<void>} 完成
+ */
+async function createNote() {
+  const where = state.dir || '根目录'
+  const title = prompt(`新建笔记（位置：${where}）`, '')
+  if (title === null) return
+  const trimmed = String(title).trim()
+  if (!trimmed) return
+
+  const folder = (state.manifest?.folders ?? []).find((f) => f.path === state.dir)
+
+  try {
+    const data = await apiFetch('/api/v1/docs', {
+      method: 'POST',
+      body: {
+        title: trimmed,
+        folderId: folder?.fid ?? null,
+        // 头部先把元数据骨架写好：这是"文档自带元数据"最直观的教学
+        content: `# ${trimmed}\n\n`,
+      },
+    })
+    const id = data?.doc?.id
+    if (!id) {
+      alert('创建失败：服务端没有返回文档 id')
+      return
+    }
+    if (data.existing) {
+      alert(data.note ?? '库里已有内容完全相同的文档')
+    }
+    await refreshManifest()
+    // 直接进阅读页写正文
+    location.href = `/view.html?id=${encodeURIComponent(id)}&edit=1`
+  } catch (err) {
+    alert(`新建失败：${err.message}`)
+  }
+}
+
+/**
  * 初始化。
  */
 async function main() {
@@ -761,6 +805,19 @@ async function main() {
   // 上传是唯一需要登录的日常操作。未登录时不去挂上传逻辑，
   // 而是点一下直接引导登录 —— 比让他选完文件再吃 403 友好得多。
   const canWrite = state.auth?.authenticated === true
+  // ---- 写笔记（在网页里新建一篇 Markdown）----
+  // 与上传共用同一套权限判断：都是"写"操作，未登录时引导登录
+  if (el.btnNote) {
+    if (canWrite) {
+      el.btnNote.addEventListener('click', () => createNote())
+    } else {
+      el.btnNote.addEventListener('click', () => {
+        if (confirm('写笔记需要登录。现在去登录？')) showLoginDialog()
+      })
+      setTip(el.btnNote, '写笔记需要登录')
+    }
+  }
+
   if (canWrite) {
     mountUpload({
       button: el.btnUpload,

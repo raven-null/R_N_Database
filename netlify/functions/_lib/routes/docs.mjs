@@ -26,6 +26,7 @@ import { isEditableType } from '../file-types.mjs'
 import { normalizeDoc } from '../doc-model.mjs'
 import { loadFolders } from '../folders.mjs'
 import { dirOfDoc, isPublicDoc, visibleDocs } from '../doc-dir.mjs'
+import { parseFrontMatter, metaFromFrontMatter, stripFrontMatter } from '../front-matter.mjs'
 import { plainTextOf, countLines } from '../plain-text.mjs'
 import { dirOf } from '../source-dir.mjs'
 
@@ -78,6 +79,7 @@ export async function docsRoute(req, url, seg) {
   try {
     // /api/v1/docs
     if (seg.length === 0) {
+      if (req.method === 'POST') return createNote(req, auth)
       if (req.method !== 'GET') return badRequest('列表接口只接受 GET', { req })
       return listDocs(req, url, auth)
     }
@@ -368,8 +370,21 @@ async function updateContent(req, id, auth) {
   }
 
   // ---- 4. 元数据 ----
-  const newMeta = {
+  // Markdown 改了 front matter 就等于改了元数据：标题、标签、分类、
+  // 可见性都跟着重算 —— 这样「在文件头写清楚」才真的有效，
+  // 而不是只能靠入库那一次。
+  const fm = oldMeta.type === 'md' ? metaFromFrontMatter(parseFrontMatter(text).data) : null
+
+  const newMeta = normalizeDoc({
     ...oldMeta,
+    ...(fm ? {
+      title: fm.title || oldMeta.title,
+      tags: fm.tags.length ? fm.tags : oldMeta.tags,
+      categories: fm.categories.length ? fm.categories : oldMeta.categories,
+      visibility: fm.visibility || oldMeta.visibility,
+      summary: fm.summary || oldMeta.summary,
+      author: fm.author || oldMeta.author,
+    } : {}),
     sha256,
     size: buf.length,
     hasText: Boolean(newBody),
@@ -383,7 +398,7 @@ async function updateContent(req, id, auth) {
     // 内容变了，旧的「待复查」结论不再可信 —— 但不替用户自动下判断，
     // 只把标记留着，等他自己决定是否重新分类
     editedAt: oldMeta.editedAt ?? now,
-  }
+  })
 
   const metaStore = await getDocsStore(STORES.META)
   await metaStore.set(id, JSON.stringify(newMeta))
@@ -408,6 +423,125 @@ async function updateContent(req, id, auth) {
     note: indexError
       ? '内容已保存，但索引更新失败 —— 检索结果可能暂时不准，可在本地运行 node scripts/reindex.mjs 修复。'
       : '内容、正文、预览件与索引均已更新。',
+  }, { req })
+}
+
+/**
+ * POST /api/v1/docs —— 在网页里新建一篇 Markdown 笔记。
+ *
+ * ## 为什么需要它
+ *
+ * 之前入库只有一条路：上传文件。而"资料库"里最该顺手做的事，
+ * 其实是**想到什么就写一条**。有了真正的文件夹树之后，这一点更明显：
+ * 能建文件夹却不能在里写东西，很别扭。
+ *
+ * ## id 仍然按内容算
+ *
+ * 与入库一致（`sha256(内容)` 前 12 位）。好处是天然去重：同样的空笔记
+ * 不会创建两份。代价是"改了内容 id 不变"这件事仍然成立 —— 那由
+ * `PUT /docs/{id}/content` 保证（那里坚决不改 id）。
+ *
+ * @param {Request} req - 请求
+ * @param {object} auth - 鉴权结果
+ * @returns {Promise<Response>} 响应
+ */
+async function createNote(req, auth) {
+  let body
+  try {
+    body = await req.json()
+  } catch {
+    return badRequest('请求体不是合法 JSON', { req })
+  }
+
+  const title = String(body?.title ?? '').trim().slice(0, 200)
+  if (!title) return badRequest('缺少标题 title', { req })
+
+  let content = typeof body?.content === 'string' ? body.content : ''
+  if (!content) content = `# ${title}\n\n`
+  if (content.length > MAX_CONTENT_CHARS) {
+    return badRequest(`内容过长（上限 ${MAX_CONTENT_CHARS} 字符）`, { req })
+  }
+
+  const buf = Buffer.from(content, 'utf8')
+  const sha256 = createHash('sha256').update(buf).digest('hex')
+  const id = sha256.slice(0, 12)
+
+  // 同一份内容已经在库里 → 直接告诉用户，别造第二份
+  const existing = await readMeta(id)
+  if (existing) {
+    return ok({
+      doc: existing,
+      existing: true,
+      note: `库里已有内容完全相同的文档「${existing.title}」，没有新建。`,
+    }, { req })
+  }
+
+  // 文件夹：可选，必须存在
+  let folderId = body?.folderId ? String(body.folderId) : null
+  if (folderId) {
+    const idx = await loadFolders()
+    if (!idx.get(folderId)) return badRequest('目标文件夹不存在', { req })
+  }
+
+  const fm = metaFromFrontMatter(parseFrontMatter(content).data)
+  const text = plainTextOf(stripFrontMatter(content), 'md')
+  const now = new Date().toISOString()
+
+  const meta = normalizeDoc({
+    id,
+    sha256,
+    title: fm.title || title,
+    originalName: `${title}.md`,
+    ext: 'md',
+    type: 'md',
+    mime: 'text/markdown; charset=utf-8',
+    size: buf.length,
+    pages: null,
+    author: fm.author || '',
+    docCreatedAt: fm.docCreatedAt ?? null,
+    summary: fm.summary || '',
+    sourcePath: `note://${id}`,
+    folderId,
+    categories: fm.categories.length ? fm.categories : ['未归类'],
+    tags: fm.tags,
+    classifySource: fm.categories.length || fm.tags.length ? 'front-matter' : 'manual',
+    needsReview: !(fm.categories.length > 0),
+    hasText: Boolean(text),
+    textChars: text.length,
+    previewKind: 'markdown',
+    previewNote: '',
+    ingestedAt: now,
+    updatedAt: now,
+    ingestedBy: 'editor',
+  }, { now })
+  if (fm.visibility) meta.visibility = fm.visibility
+
+  // ---- 写三层：原件 / 正文 / 元数据 ----
+  const filesStore = await getDocsStore(STORES.FILES)
+  const textStore = await getDocsStore(STORES.TEXT)
+  const previewStore = await getDocsStore(STORES.PREVIEWS)
+  const metaStore = await getDocsStore(STORES.META)
+
+  await filesStore.set(`${id}.md`, buf)
+  if (text) await textStore.set(id, JSON.stringify({ pages: [text] }))
+  const rendered = renderMarkdownPage(content, meta.title)
+  await previewStore.set(`${id}.html`, rendered.html)
+  await metaStore.set(id, JSON.stringify(meta))
+
+  // ---- 索引 ----
+  let indexError = null
+  try {
+    await applyDocChange({ oldMeta: null, newMeta: meta })
+  } catch (err) {
+    indexError = String(err?.message ?? err)
+  }
+
+  return ok({
+    doc: meta,
+    indexError,
+    note: indexError
+      ? '笔记已创建，但索引更新失败 —— 检索暂时搜不到它，可用 /api/v1/index/repair 修复。'
+      : '已创建，可以直接开始写。',
   }, { req })
 }
 

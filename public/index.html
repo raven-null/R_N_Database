@@ -11,7 +11,7 @@
   <meta name="theme-color" content="#f4efe4">
   <!-- CSS/JS 带 ?v= 版本号：netlify.toml 对 /css/* /js/* 设了 immutable 长缓存，
        改版时必须同步改这里的 v 值，否则客户端拿不到新文件。 -->
-  <link rel="stylesheet" href="/css/style.css?v=0.8.3">
+  <link rel="stylesheet" href="/css/style.css?v=0.8.4">
 </head>
 <body class="list-page">
   <!-- 页面上不摆任何说明文字：能解释的东西全收在 ? 里（悬停 / 聚焦查看）。 -->
@@ -34,6 +34,7 @@
 
     <div class="topbar-actions">
       <button class="btn ghost" id="btn-select">选择</button>
+      <button class="btn ghost" id="btn-note">写笔记</button>
       <button class="btn ghost" id="btn-upload">上传</button>
       <button class="btn ghost" id="btn-upload-dir">传文件夹</button>
       <button class="tip" type="button" id="tip-upload" data-tip="上传把原件存进暂存区，入库要在本地跑命令。
@@ -67,6 +68,6 @@
   <!-- 批量操作栏：底部浮出，仅在选择模式显示 -->
   <div id="selbar" class="selbar" hidden></div>
 
-  <script type="module" src="/js/list.js?v=0.8.3"></script>
+  <script type="module" src="/js/list.js?v=0.8.4"></script>
 </body>
 </html>

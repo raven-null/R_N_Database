@@ -44,7 +44,8 @@
     "test:export": "node scripts/test-export.mjs",
     "doctor": "node scripts/doctor.mjs",
     "test:model": "node scripts/test-model.mjs",
-    "test:folders": "node scripts/test-folders.mjs"
+    "test:folders": "node scripts/test-folders.mjs",
+    "test:note": "node scripts/test-md-note.mjs"
   },
   "devDependencies": {
     "@pagus-kit/core": "^0.1.1",

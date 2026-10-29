@@ -41,6 +41,7 @@ import { convertToPdfDetailed, findLibreOffice as findSoffice, officeEngineStatu
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 import { normalizeDoc } from '../netlify/functions/_lib/doc-model.mjs'
+import { parseFrontMatter, metaFromFrontMatter } from '../netlify/functions/_lib/front-matter.mjs'
 
 const ROOT = process.cwd()
 const TAXONOMY_FILE = join(ROOT, 'config', 'taxonomy.json')
@@ -356,6 +357,11 @@ export async function ingestOne(filePath, ctx, override = {}) {
     webViewStats = web.stats
   }
 
+  // ---- front matter（Markdown 自己带的元数据优先于人猜的）----
+  const fm = type === 'md'
+    ? metaFromFrontMatter(parseFrontMatter(buf.toString('utf8')).data)
+    : null
+
   // ---- 写入 ----
   const now = new Date().toISOString()
   // ★ 一律过 normalizeDoc：可见性/状态/rev/数组形态由模型统一给值，
@@ -363,7 +369,7 @@ export async function ingestOne(filePath, ctx, override = {}) {
   const meta = normalizeDoc({
     id,
     sha256: createHash('sha256').update(buf).digest('hex'),
-    title: finalTitle,
+    title: fm?.title || finalTitle,
     // 拼音在入库时算好：前端就不必加载 315KB 的 pinyin-pro
     pinyin: pinyinForms(`${finalTitle} ${name}`) ?? undefined,
     embeddedTitle: extracted.title || '',
@@ -382,9 +388,9 @@ export async function ingestOne(filePath, ctx, override = {}) {
     fileModifiedAt: statSync(abs).mtime.toISOString(),
     ingestedAt: now,
     updatedAt: now,
-    categories: cls.categories,
-    tags: cls.tags,
-    summary: cls.summary,
+    categories: fm?.categories?.length ? fm.categories : cls.categories,
+    tags: fm?.tags?.length ? fm.tags : cls.tags,
+    summary: fm?.summary || cls.summary,
     classifySource: cls.source,
     needsReview: cls.needsReview,
     aiError: cls.aiError,
@@ -400,6 +406,9 @@ export async function ingestOne(filePath, ctx, override = {}) {
     webViewNote: webViewNote || undefined,
     webViewStats: webViewStats || undefined,
   })
+
+  // front matter 里写了 visibility 就以它为准
+  if (fm?.visibility) meta.visibility = fm.visibility
 
   const filesStore = await store(STORES.FILES)
   const textStore = await store(STORES.TEXT)

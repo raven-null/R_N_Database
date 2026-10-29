@@ -18,7 +18,7 @@
  * @module scripts/check
  */
 
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
@@ -400,6 +400,48 @@ export default {
  *
  * @returns {void}
  */
+/**
+ * 把 marked 的浏览器版复制到 `public/vendor/`。
+ *
+ * ## 为什么要在构建期复制
+ *
+ * 阅读页的 Markdown 预览由服务端渲染（`_lib/markdown-view.mjs`），但
+ * **编辑时的实时预览**必须在浏览器里、每敲几个字就重画一次 —— 不能每
+ * 一次按键都打一趟服务器。
+ *
+ * `marked` 已经是项目依赖，但 Netlify 只发布 `public/`，node_modules 里的
+ * 东西不会被托管。所以构建期把它拷一份进去。拷贝而不是手写/引入 CDN：
+ *   · 手写一个 Markdown 渲染器是重新发明轮子，还必然和线上预览不一致
+ *   · CDN 会让"离线/被墙/版本漂移"变成站点的一部分
+ *
+ * 目标文件提交进仓库（体积约 40KB），这样本地起 dev server 也能直接用。
+ *
+ * @returns {void}
+ */
+function syncVendorAssets() {
+  const src = join(ROOT, 'node_modules', 'marked', 'lib', 'marked.esm.js')
+  const dir = join(ROOT, 'public', 'vendor')
+  const dst = join(dir, 'marked.esm.js')
+
+  if (!existsSync(src)) {
+    warn('没有找到 marked 的浏览器构建（node_modules/marked）—— 编辑器实时预览会退化成纯文本')
+    return
+  }
+  const body = readFileSync(src, 'utf8')
+
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    if (existsSync(dst) && readFileSync(dst, 'utf8') === body) {
+      note(`编辑器依赖已是最新（marked ${(body.length / 1024).toFixed(0)}KB）`)
+      return
+    }
+    writeFileSync(dst, body, 'utf8')
+    note(`已同步编辑器依赖到 public/vendor/marked.esm.js（${(body.length / 1024).toFixed(0)}KB）`)
+  } catch (err) {
+    fail(`写 public/vendor/marked.esm.js 失败：${err.message}`)
+  }
+}
+
 function syncTaxonomyForFunctions() {
   const src = join(ROOT, 'config', 'taxonomy.json')
   const dst = join(ROOT, 'netlify', 'functions', '_lib', 'taxonomy-default.mjs')
@@ -460,6 +502,7 @@ async function main() {
   checkEnvValueLeaks()
   checkOptionalTools()
   syncTaxonomyForFunctions()
+  syncVendorAssets()
   generateBuildInfo()
 
   for (const n of notes) console.log(`  · ${n}`)

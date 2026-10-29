@@ -40,6 +40,7 @@ import { detectType, mimeOf, titleFromFilename } from './file-types.mjs'
 // 正文规整同样走共享实现：网页编辑内容之后重算的正文，
 // 必须与入库时算出来的一字不差
 import { cleanText, plainTextOf } from './plain-text.mjs'
+import { stripFrontMatter } from './front-matter.mjs'
 
 export { detectType, mimeOf, titleFromFilename }
 
@@ -466,7 +467,9 @@ function slideNo(name) {
  * @returns {{html:string, text:string, meta:object}} 结果
  */
 function extractPlain(buf, type) {
-  const raw = buf.toString('utf8')
+  // 去掉 UTF-8 BOM：Windows 编辑器常带，它会变成正文第一个字符，
+  // 让 front matter 认不出来、也让检索里多一个看不见的字符
+  const raw = buf.toString('utf8').replace(/^\uFEFF/, '')
   if (type === 'csv') {
     const rows = raw.split(/\r?\n/).filter(Boolean).map((line) => line.split(','))
     const html = '<table class="sheet-table"><tbody>'
@@ -475,9 +478,13 @@ function extractPlain(buf, type) {
     return { html, text: cleanText(raw), meta: { rowCount: rows.length } }
   }
 
+  // Markdown 的 front matter 是**元数据**，不是正文：进索引前先摘掉，
+  // 否则搜 "tags:" 会把所有带头的笔记都命中，标题也容易被 YAML 干扰。
+  const source = type === 'md' ? stripFrontMatter(raw) : raw
+
   // 代码保留原文（只统一换行为 LF），Markdown/纯文本按清洗规则压缩空白。
   // 两种行为都在 plainTextOf 里，网页编辑走的是同一份实现。
-  return { html: '', text: plainTextOf(raw, type), meta: {} }
+  return { html: '', text: plainTextOf(source, type), meta: {} }
 }
 
 /* ============================================================

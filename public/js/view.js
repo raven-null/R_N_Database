@@ -434,6 +434,9 @@ async function main() {
       // 词表用于分类多选框；拿不到也不阻塞查看
       taxonomyCache = await fetchTaxonomy().catch(() => null)
       rewirePanelButtons(true)
+
+      // ?edit=1：列表页「写笔记」建完就直接进编辑器，少点一次
+      if (param('edit') === '1') openContentEditor(true)
     }
   } catch (err) {
     el.title.textContent = '打开失败'

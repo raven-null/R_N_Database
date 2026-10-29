@@ -51,6 +51,7 @@ import { applyDocChange } from './index-store.mjs'
 import { escHtml } from './source-view.mjs'
 import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 import { normalizeDoc } from './doc-model.mjs'
+import { parseFrontMatter, metaFromFrontMatter } from './front-matter.mjs'
 import { loadFolders, ensurePath } from './folders.mjs'
 
 /** 单次最多处理多少份（再多会顶到函数时限）。 */
@@ -170,7 +171,15 @@ async function ingestOne(ctx) {
   const folderId = await ensurePath(ctx.folders, uploadRoot)
 
   const cls = classifyByRules(classifyTitle, extracted.text, taxonomy)
-  const tags = mergeTagsFor(cls.categories, cls.tags, taxonomy)
+  let tags = mergeTagsFor(cls.categories, cls.tags, taxonomy)
+
+  // Markdown 头部自己写了元数据就听它的：人写的永远比规则猜的准。
+  // （front matter 已在抽取阶段从正文里摘掉了，不会污染索引）
+  let fm = null
+  if (type === 'md') {
+    fm = metaFromFrontMatter(parseFrontMatter(buf.toString('utf8')).data)
+    if (fm.tags.length) tags = fm.tags
+  }
 
   // ---- 预览件 ----
   let previewKind = 'none'
@@ -212,7 +221,7 @@ async function ingestOne(ctx) {
   const newMeta = normalizeDoc({
     id,
     sha256,
-    title,
+    title: fm?.title || title,
     embeddedTitle: extracted.title || '',
     originalName: rec.originalName,
     relativePath: rec.relativePath,
@@ -228,11 +237,12 @@ async function ingestOne(ctx) {
     sourcePath: `upload://${rec.relativePath || rec.originalName}`,
     ingestedAt: now,
     updatedAt: now,
-    categories: cls.categories,
+    categories: fm?.categories?.length ? fm.categories : cls.categories,
     tags,
-    summary: '',
+    summary: fm?.summary || '',
     classifySource: 'rules',
-    needsReview: cls.categories.includes('未归类') || Boolean(extracted.error),
+    needsReview: (fm?.categories?.length ? false : cls.categories.includes('未归类'))
+      || Boolean(extracted.error),
     aiError: null,
     hasText: Boolean(extracted.text),
     textChars: extracted.text?.length ?? 0,
@@ -245,6 +255,8 @@ async function ingestOne(ctx) {
     webView: null,
     ingestedBy: 'server',
   })
+  // front matter 里写了 visibility 就以它为准（否则走模型默认的 private）
+  if (fm?.visibility) newMeta.visibility = fm.visibility
 
   await ctx.filesStore.set(`${id}.${ext}`, buf)
   await ctx.metaStore.set(id, JSON.stringify(newMeta))
