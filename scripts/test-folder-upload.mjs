@@ -23,6 +23,7 @@
 
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { JSDOM, VirtualConsole } from 'jsdom'
@@ -383,7 +384,8 @@ async function testBrowserFolderPicker() {
   const files = [
     makeFile(aContent, `${MARK}-a.txt`, `${MARK}/${MARK}-a.txt`),
     makeFile(bContent, `${MARK}-b.md`, `${MARK}/子目录/${MARK}-b.md`),
-    makeFile(`${MARK} big`, `${MARK}-big.pdf`, `${MARK}/${MARK}-big.pdf`, 21 * 1024 * 1024),   // 超限
+    // 超限：上限已提到 100MB（大文件走分片），所以这里伪造 101MB
+    makeFile(`${MARK} big`, `${MARK}-big.pdf`, `${MARK}/${MARK}-big.pdf`, 101 * 1024 * 1024),
     makeFile(`${MARK} pic`, `${MARK}-pic.png`, `${MARK}/${MARK}-pic.png`),                     // 不支持
     makeFile('db', 'Thumbs.db', `${MARK}/Thumbs.db`),                                          // 系统文件
     makeFile('lock', '~$草稿.docx', `${MARK}/~$草稿.docx`),                                     // Office 锁文件
@@ -394,9 +396,9 @@ async function testBrowserFolderPicker() {
   await onChangeDone
   const text = banner.textContent.replace(/\s+/g, ' ').trim()
 
-  check(text.includes('已上传 2 / 2'), '2 个支持的、不超限的文件被上传', text.slice(0, 260))
+  check(text.includes('成功上传 2 / 2'), '2 个支持的、不超限的文件被上传', text.slice(0, 260))
   check(text.includes('跳过 1 个不支持的类型'), '不支持的类型被跳过')
-  check(text.includes('超过 20MB'), '超限文件被跳过并说明原因')
+  check(/超过 100MB/.test(text), '超限文件被跳过并说明原因', text.slice(0, 260))
   check(text.includes('跳过 2 个系统/临时文件'), 'Thumbs.db 与 ~$ 锁文件被跳过')
   check(errors.length === 0, '无 jsdom 报错', errors.join(' | '))
 
@@ -578,6 +580,62 @@ async function testIncrementalSync() {
 }
 
 /* ============================================================
+   大文件分片上传
+   ============================================================ */
+
+/**
+ * 大文件必须自动走分片。
+ *
+ * 起因是一次真实的线上失败：Netlify Functions 的请求体上限是 **6MB**，
+ * 超过就返回 413，请求根本进不到函数里。而客户端当时允许 20MB，
+ * 于是一份十几兆的 PDF 传上去只看到"响应不是 JSON（HTTP 413）"。
+ *
+ * 这个用例用一个 9MB 的文件走完整的浏览器侧流程：
+ * 客户端应当自动切成 3 片（4MB + 4MB + 1MB），服务端拼回来后
+ * **哈希必须与本地一致** —— 拼错一片，哈希立刻不同。
+ */
+async function testChunkedUpload() {
+  console.log('\n【大文件：自动分片上传】')
+
+  await cleanStaging()
+
+  const root = `BIG${Date.now()}`
+  const name = `${root}-big.pdf`
+  const size = 9 * 1024 * 1024
+  const bytes = randomBytes(size)
+  const file = makeFile(bytes, name, `${root}/${name}`)
+
+  const { ctl, banner, errors } = await mountUploadUi()
+  const summary = await ctl.handleFiles([{ file, relPath: `${root}/${name}` }], `文件夹 ${root}/`)
+  const text = banner.textContent.replace(/\s+/g, ' ').trim()
+
+  check(summary.uploaded === 1, `9MB 文件上传成功（实际 ${summary.uploaded}）`, text.slice(0, 240))
+  check(summary.failed === 0, `没有失败（实际 ${summary.failed}）`, text.slice(0, 240))
+  check(errors.length === 0, '无 jsdom 报错', errors.join(' | '))
+
+  const items = ((await api('/api/v1/inbox')).body?.data?.items ?? [])
+    .filter((it) => it.originalName === name)
+  for (const it of items) stagedIds.add(it.id)
+
+  check(items.length === 1, `暂存区里有 1 条记录（实际 ${items.length}）`)
+  check(items[0]?.size === size, `大小完全一致（${items[0]?.size} = ${size}）`)
+  check(
+    items[0]?.sha256 === createHash('sha256').update(bytes).digest('hex'),
+    '拼回来的内容哈希与本地一致（分片没串味、没漏片）',
+  )
+
+  // 顺便验一下单片上传被拒时给了人话
+  const tooBig = await api(`/api/v1/inbox?name=${root}-huge.pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: Buffer.alloc(5 * 1024 * 1024, 1),   // 5MB > 服务端单片上限 4MB
+  })
+  check(tooBig.status === 400, `超过单片上限被拒（${tooBig.status}）`)
+  check(/分片/.test(tooBig.body?.error?.message ?? ''),
+    '拒绝时提示改用分片（而不是一句"太大"）', tooBig.body?.error?.message)
+}
+
+/* ============================================================
    入库阶段：来源路径
    ============================================================ */
 
@@ -658,6 +716,7 @@ async function main() {
     await testApi()
     await testBrowserCollect()
     await testBrowserFolderPicker()
+    await testChunkedUpload()
     await testIncrementalSync()
     await testIngestProvenance()
   } finally {

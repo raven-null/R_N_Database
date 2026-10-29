@@ -36,8 +36,23 @@
 import { esc, fmtSize, fmtDate, typeBadge } from './util.js'
 import { authHeaders, apiFetch } from './api.js'
 
-/** 单文件上限，与服务端保持一致。 */
-const MAX_BYTES = 20 * 1024 * 1024
+/**
+ * 单文件大小上限。
+ *
+ * 100MB 是**分片上传**的上限，不是单次请求的上限 ——
+ * Netlify 函数的请求体只有 6MB，超过 4MB 的文件会自动切片传。
+ * 再大的文件建议用命令行（`node scripts/ingest.mjs "目录"`，
+ * 直写 Blobs，没有这些限制，也不过网络）。
+ */
+const MAX_BYTES = 100 * 1024 * 1024
+
+/**
+ * 分片大小。
+ *
+ * ★ 必须 ≤ 4MB：Netlify Functions 的请求体上限是 **6MB**，超了平台直接
+ * 返回 413，请求根本进不到函数里。这个数字与服务端 CHUNK_SIZE 一致。
+ */
+const CHUNK_SIZE = 4 * 1024 * 1024
 
 /** 一次最多处理多少个文件（再多请走命令行，那个没有限制）。 */
 const MAX_FILES = 500
@@ -138,13 +153,116 @@ function rootOf(items) {
 }
 
 /**
- * 把单个文件传到暂存区。
+ * 把 HTTP 失败翻译成人能看懂的话。
+ *
+ * 这几个状态码背后都是**平台限制**，而不是我们的代码出错，
+ * 直接甩一句"响应不是 JSON（HTTP 413）"没有任何指导意义 ——
+ * 线上第一次拖大文件进来时，用户看到的就是这句话。
+ *
+ * @param {number} status - HTTP 状态
+ * @param {string} [snippet] - 响应体片段（可能是 HTML）
+ * @returns {string} 说明
+ */
+function explainStatus(status, snippet = '') {
+  if (status === 413) {
+    return '文件太大，超过了服务端单次请求上限（Netlify 函数 6MB）—— '
+      + '应该是分片上传没生效，请刷新页面重试'
+  }
+  if (status === 401 || status === 403) return '没有上传权限，请先登录'
+  if (status === 404) return '上传接口不存在（部署可能不完整）'
+  if (status === 429) return '请求太频繁，稍等一下再试'
+  if (status === 502 || status === 503 || status === 504) return '服务端超时或暂时不可用，稍后重试'
+  if (status >= 500) return `服务端错误（HTTP ${status}）${snippet ? `：${snippet.slice(0, 80)}` : ''}`
+  return `HTTP ${status}${snippet ? `：${snippet.slice(0, 80)}` : ''}`
+}
+
+/**
+ * 读一次响应并转成统一结果。
+ *
+ * @param {Response} res - 响应
+ * @returns {Promise<object>} 业务数据
+ */
+async function readJsonOrThrow(res) {
+  let text = ''
+  try {
+    text = await res.text()
+  } catch {
+    /* 读不出来就按状态码解释 */
+  }
+
+  let body = null
+  try {
+    body = JSON.parse(text)
+  } catch {
+    // 非 JSON：多半是平台的错误页（413 之类）
+    throw new Error(explainStatus(res.status, text))
+  }
+
+  if (!body?.ok) {
+    throw new Error(body?.error?.message ?? explainStatus(res.status))
+  }
+  return body.data
+}
+
+/**
+ * 分片上传一个大文件。
+ *
+ * Netlify 函数的请求体上限是 6MB，超了直接 413（请求进不到我们的代码）。
+ * 所以 > 4MB 的文件切成 4MB 一片多次传，服务端按 uploadId 攒起来再合流。
+ *
+ * @param {File} file - 文件
+ * @param {string} relPath - 相对路径
+ * @param {(i:number, total:number) => void} [onChunk] - 分片进度回调
+ * @returns {Promise<object>} 服务端返回的记录
+ */
+async function uploadChunked(file, relPath, onChunk) {
+  const uploadId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}${Math.random()}`)
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(0, 32)
+  const total = Math.ceil(file.size / CHUNK_SIZE)
+
+  for (let i = 0; i < total; i++) {
+    const blob = file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size))
+    const params = new URLSearchParams({
+      uploadId,
+      index: String(i),
+      total: String(total),
+      size: String(file.size),
+    })
+    // 文件名与路径只需要第一片带上，后续分片服务端从存档里取
+    if (i === 0) {
+      params.set('name', file.name)
+      if (relPath && relPath.includes('/')) params.set('path', relPath)
+    }
+
+    onChunk?.(i + 1, total)
+    const res = await fetch(`/api/v1/inbox/chunk?${params}`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/octet-stream' },
+      body: blob,
+    })
+    await readJsonOrThrow(res)
+  }
+
+  const done = await fetch(`/api/v1/inbox/chunk/complete?uploadId=${uploadId}`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  return readJsonOrThrow(done)
+}
+
+/**
+ * 把单个文件传到暂存区（自动选择整份传还是分片传）。
  *
  * @param {File} file - 浏览器 File 对象
  * @param {string} [relPath] - 相对路径（整目录上传时才有）
+ * @param {(i:number, total:number) => void} [onChunk] - 分片进度回调
  * @returns {Promise<object>} 服务端返回的记录
  */
-async function uploadOne(file, relPath) {
+async function uploadOne(file, relPath, onChunk) {
+  // 大文件走分片：一次传整份必然撞 6MB 请求体上限
+  if (file.size > CHUNK_SIZE) return uploadChunked(file, relPath, onChunk)
+
   const params = new URLSearchParams({ name: file.name })
   // 只有真的带目录信息时才传 path，单文件上传保持原来的请求形态
   if (relPath && relPath.includes('/')) params.set('path', relPath)
@@ -155,14 +273,7 @@ async function uploadOne(file, relPath) {
     body: file,
   })
 
-  let body = null
-  try {
-    body = await res.json()
-  } catch {
-    throw new Error(`响应不是 JSON（HTTP ${res.status}）`)
-  }
-  if (!body?.ok) throw new Error(body?.error?.message ?? `HTTP ${res.status}`)
-  return body.data
+  return readJsonOrThrow(res)
 }
 
 /**
@@ -503,7 +614,10 @@ export function mountUpload(opts) {
         if (idx >= toSend.length) return
         const it = toSend[idx]
         try {
-          const rec = await uploadOne(it.file, it.relPath)
+          const rec = await uploadOne(it.file, it.relPath, (i, total) => {
+            // 单个大文件要传好几个分片，进度条得让用户看到它在动
+            if (total > 1) showProgress(`正在上传（分片 ${i}/${total}）`, done, toSend.length, it.relPath)
+          })
           results.push({ item: it, rec, error: null })
         } catch (err) {
           results.push({ item: it, rec: null, error: String(err?.message ?? err) })
@@ -544,7 +658,9 @@ export function mountUpload(opts) {
       if (planStats.replace) bits.push(`替换 ${planStats.replace}（入库时删旧迎新）`)
       if (planStats.unchanged) bits.push(`未变 ${planStats.unchanged}（库里已有同内容，跳过上传）`)
       if (planStats.pending) bits.push(`暂存区已有 ${planStats.pending}`)
-      if (bits.length) planLines.push(bits.join('　·　'))
+      // ★ 写成「本次比对」而不是光秃秃的「新增 3」：
+      // 上传失败时，"已上传 2/3" 与 "新增 3" 并排会让人以为成功了 3 个
+      if (bits.length) planLines.push(`本次比对 —— ${bits.join('　·　')}`)
     } else if (hashNote) {
       planLines.push(hashNote)
     }
@@ -561,12 +677,13 @@ export function mountUpload(opts) {
     banner.innerHTML = `<div class="banner ${failed.length || cancelled ? 'warn' : 'info'}">
       <b>${nothingToSend
     ? `不需要上传：${queue.length} 个文件都已是最新`
-    : `已上传 ${doneOk.length} / ${toSend.length} 个文件（本次共检查 ${queue.length} 个）`}</b>
+    : `成功上传 ${doneOk.length} / ${toSend.length} 个文件（本次共检查 ${queue.length} 个）`}</b>
       ${cancelled ? '<br>· 已按你的要求停止，剩余文件没有上传' : ''}
       ${planLines.map((l) => `<br>· ${l}`).join('')}
       ${skipLines.map((l) => `<br>· ${l}`).join('')}
-      ${failed.slice(0, 8).map((r) => `<br>✗ ${esc(r.item.relPath)}：${esc(r.error)}`).join('')}
-      ${failed.length > 8 ? `<br>✗ 另有 ${failed.length - 8} 个失败` : ''}
+      ${failed.length ? `<br>✗ ${failed.length} 个上传失败：` : ''}
+      ${failed.slice(0, 8).map((r) => `<br>　✗ ${esc(r.item.relPath)}：${esc(r.error)}`).join('')}
+      ${failed.length > 8 ? `<br>　✗ 另有 ${failed.length - 8} 个失败` : ''}
       ${dupInLib.length ? `<br>· ${dupInLib.length} 个库里已有同样内容，入库时会自动去重` : ''}
       ${dupPending.length ? `<br>· ${dupPending.length} 个暂存区已有同样内容` : ''}
       ${nothingToSend ? '' : `<br><br>尚未入库，在本地运行 <code>node scripts/process-pending.mjs</code>

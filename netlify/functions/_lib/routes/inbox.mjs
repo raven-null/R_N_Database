@@ -30,12 +30,34 @@ import { readAllMeta } from '../repo.mjs'
 import { detectType, titleFromFilename, SUPPORTED_EXTENSIONS } from '../file-types.mjs'
 
 /**
- * 单次上传体积上限。
+ * 单次 **HTTP 请求**的请求体上限。
  *
- * 受函数请求体上限约束；更大的文件请走命令行
- * （node scripts/ingest.mjs "<目录>"），那条路是直写 Blobs，没有这个限制。
+ * ★ Netlify Functions 的请求体上限是 **6 MB**（平台限制，超了直接返回
+ * HTTP 413，请求根本进不到这段代码里）。这里取 4 MB 留余量。
+ *
+ * 这个数字曾经写错成 20MB —— 本地 dev-server 没有平台限制，
+ * 一切都好；一上线，凡是超过 6MB 的文件全部 413，
+ * 而我们的检查又"通过"了，用户只看到"响应不是 JSON（HTTP 413）"。
+ * 现在：超过这个数的走**分片上传**（见下方 CHUNK_SIZE）。
  */
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+const MAX_SINGLE_BYTES = 4 * 1024 * 1024
+
+/** 分片大小。客户端与服务端必须一致。 */
+const CHUNK_SIZE = 4 * 1024 * 1024
+
+/**
+ * 单个文件的上限（走分片）。
+ *
+ * Blobs 单对象上限是 5 GB，所以卡的是函数内存与体验：100MB 已经是
+ * 个人资料里很大的文件了，再大就该用命令行直写（没有这个限制）。
+ */
+const MAX_FILE_BYTES = 100 * 1024 * 1024
+
+/** 最多多少个分片（防止用无限 uploadId 灌垃圾）。 */
+const MAX_CHUNKS = Math.ceil(MAX_FILE_BYTES / CHUNK_SIZE)
+
+/** 分片多久没齐就作废（毫秒）。 */
+const CHUNK_TTL_MS = 6 * 60 * 60 * 1000
 
 /** 待处理清单最多返回多少条。 */
 const LIST_LIMIT = 300
@@ -119,6 +141,23 @@ export async function inboxRoute(req, url, seg) {
     if (seg.length === 1 && seg[0] === 'check') {
       if (req.method !== 'POST') return badRequest('比对接口只接受 POST', { req })
       return checkBatch(req)
+    }
+
+    // ---- 分片上传（大文件绕开 6MB 请求体上限）----
+    //   POST   /api/v1/inbox/chunk             传一个分片
+    //   POST   /api/v1/inbox/chunk/complete    合流成整份文件
+    //   DELETE /api/v1/inbox/chunk?uploadId=   放弃这次上传
+    if (seg[0] === 'chunk') {
+      if (seg.length === 2 && seg[1] === 'complete') {
+        if (req.method !== 'POST') return badRequest('合流接口只接受 POST', { req })
+        return completeChunks(req, url)
+      }
+      if (seg.length === 1) {
+        if (req.method === 'POST') return receiveChunk(req, url)
+        if (req.method === 'DELETE') return abortChunks(req, url)
+        return badRequest(`${req.method} 不支持`, { req })
+      }
+      return notFound(`未知子路径：${seg.join('/')}`, { req })
     }
 
     // ---- DELETE /api/v1/inbox/{id} ----
@@ -276,13 +315,13 @@ async function listPending(req) {
 }
 
 /**
- * 接收一次上传。
+ * 解析并校验文件名与相对路径。
  *
  * @param {Request} req - 请求
  * @param {URL} url - URL
- * @returns {Promise<Response>} 响应
+ * @returns {{name:string, relPath:string, error:Response|null}} 结果
  */
-async function receiveUpload(req, url) {
+function parseNameAndPath(req, url) {
   // 文件名可以走查询参数或请求头
   const rawName = url.searchParams.get('name')
     ?? req.headers.get('x-file-name')
@@ -295,55 +334,58 @@ async function receiveUpload(req, url) {
   const name = decodedName.split(/[\\/]/).pop().trim()
 
   if (!name) {
-    return badRequest('缺少文件名（?name= 或 X-File-Name 请求头）', { req })
+    return { name: '', relPath: '', error: badRequest('缺少文件名（?name= 或 X-File-Name 请求头）', { req }) }
   }
-  if (name.length > 200) return badRequest('文件名过长', { req })
+  if (name.length > 200) {
+    return { name, relPath: '', error: badRequest('文件名过长', { req }) }
+  }
 
   const type = detectType(name)
   if (!type) {
-    return badRequest(`不支持的类型：${name.split('.').pop() || '(无扩展名)'}。`
-      + `支持 ${SUPPORTED_EXTENSIONS.join(' / ')}`, { req })
+    return {
+      name,
+      relPath: '',
+      error: badRequest(`不支持的类型：${name.split('.').pop() || '(无扩展名)'}。`
+        + `支持 ${SUPPORTED_EXTENSIONS.join(' / ')}`, { req }),
+    }
   }
 
   // 整目录上传时带上相对路径（`合同/2025/xx.pdf`）。可选：单文件上传没有。
   const pathRaw = url.searchParams.get('path')
   const relPath = normalizeRelPath(pathRaw)
   if (relPath === null) {
-    return badRequest(`相对路径不合法：${String(pathRaw).slice(0, 80)}`, { req })
+    return {
+      name,
+      relPath: '',
+      error: badRequest(`相对路径不合法：${String(pathRaw).slice(0, 80)}`, { req }),
+    }
   }
   if (relPath && !relPath.endsWith(name)) {
-    return badRequest(
-      `相对路径与文件名对不上（路径「${relPath}」，文件名「${name}」）`,
-      { req },
-    )
+    return {
+      name,
+      relPath,
+      error: badRequest(`相对路径与文件名对不上（路径「${relPath}」，文件名「${name}」）`, { req }),
+    }
   }
 
-  // 体积预检：能拿到 content-length 就先拦，省得把整个 body 读进内存
-  const declared = Number(req.headers.get('content-length'))
-  if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
-    return badRequest(`文件过大（${(declared / 1024 / 1024).toFixed(1)}MB），`
-      + `单次上限 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB。`
-      + '更大的文件请用命令行入库：node scripts/ingest.mjs "<目录>"', { req })
-  }
+  return { name, relPath, error: null }
+}
 
-  let buf
-  try {
-    buf = Buffer.from(await req.arrayBuffer())
-  } catch {
-    return badRequest('读取请求体失败', { req })
-  }
-
-  if (buf.length === 0) return badRequest('请求体为空', { req })
-  if (buf.length > MAX_UPLOAD_BYTES) {
-    return badRequest(`文件过大（${(buf.length / 1024 / 1024).toFixed(1)}MB），`
-      + `单次上限 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB`, { req })
-  }
-
+/**
+ * 把一份完整的原件写进暂存区（单次上传与分片合流共用）。
+ *
+ * @param {Request} req - 请求
+ * @param {string} name - 文件名
+ * @param {string} relPath - 相对路径（可为空）
+ * @param {Buffer} buf - 完整内容
+ * @returns {Promise<Response>} 响应
+ */
+async function saveUpload(req, name, relPath, buf) {
   const sha256 = createHash('sha256').update(buf).digest('hex')
 
   const store = await getDocsStore(STORES.INBOX)
 
-  // 已在库里的同一内容不必再传 —— 入库时也会按内容哈希去重
+  // 已在库里的同一内容不必再存 —— 入库时也会按内容哈希去重
   const existing = (await readAllMeta().catch(() => []))
     .find((d) => d.sha256 === sha256 || d.id === sha256.slice(0, 12))
 
@@ -361,7 +403,7 @@ async function receiveUpload(req, url) {
     // 目录结构（整目录上传才有）；单文件上传时不存在
     relativePath: relPath && relPath !== name ? relPath : undefined,
     title: titleFromFilename(name),
-    type,
+    type: detectType(name),
     ext,
     size: buf.length,
     sha256,
@@ -384,6 +426,221 @@ async function receiveUpload(req, url) {
         ? `暂存区里已有同样内容（${pendingDup.originalName}），这份入库时也会按哈希去重。`
         : '已存入暂存区。在本地运行 node scripts/process-pending.mjs 完成入库。',
   }, { req })
+}
+
+/**
+ * 接收一次上传（整份文件一次传完）。
+ *
+ * 只适用于 ≤ MAX_SINGLE_BYTES 的文件 —— 再大就撞 Netlify 的 6MB
+ * 请求体上限了，必须走分片（见 receiveChunk / completeChunks）。
+ *
+ * @param {Request} req - 请求
+ * @param {URL} url - URL
+ * @returns {Promise<Response>} 响应
+ */
+async function receiveUpload(req, url) {
+  const { name, relPath, error } = parseNameAndPath(req, url)
+  if (error) return error
+
+  // 体积预检：能拿到 content-length 就先拦，省得把整个 body 读进内存
+  const declared = Number(req.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_SINGLE_BYTES) {
+    return badRequest(`单个请求最多 ${MAX_SINGLE_BYTES / 1024 / 1024}MB`
+      + `（本次 ${(declared / 1024 / 1024).toFixed(1)}MB）。`
+      + '大文件请走分片上传（客户端会自动处理）；'
+      + '超过 100MB 请用命令行：node scripts/ingest.mjs "<目录>"', { req })
+  }
+
+  let buf
+  try {
+    buf = Buffer.from(await req.arrayBuffer())
+  } catch {
+    return badRequest('读取请求体失败', { req })
+  }
+
+  if (buf.length === 0) return badRequest('请求体为空', { req })
+  if (buf.length > MAX_SINGLE_BYTES) {
+    return badRequest(`单个请求最多 ${MAX_SINGLE_BYTES / 1024 / 1024}MB`
+      + `（本次 ${(buf.length / 1024 / 1024).toFixed(1)}MB），大文件请走分片上传`, { req })
+  }
+
+  return saveUpload(req, name, relPath, buf)
+}
+
+/* ============================================================
+   分片上传
+   ============================================================ */
+
+/**
+ * 接收一个分片。
+ *
+ * ## 为什么要分片
+ *
+ * Netlify Functions 的请求体上限是 6MB，这是**平台限制**，超了直接 413，
+ * 代码根本跑不到。而个人资料里 10–30MB 的 PDF / PPT 很常见。
+ * 于是把文件切成 4MB 一片分多次传，服务端按 uploadId 攒起来再合流 ——
+ * 每个请求都在限额内，总大小只受 100MB 上限约束。
+ *
+ * ## 分片怎么存
+ *
+ *   chunk/<uploadId>/<index 补零>   分片内容
+ *   chunk-meta/<uploadId>            { name, path, total, size, received[], createdAt }
+ *
+ * 补零是为了让 list() 的顺序稳定（012 不被排到 12 后面）。
+ * 超过 CHUNK_TTL_MS 没合流的会被当作垃圾清理掉。
+ *
+ * @param {Request} req - 请求
+ * @param {URL} url - URL
+ * @returns {Promise<Response>} 响应
+ */
+async function receiveChunk(req, url) {
+  const p = url.searchParams
+  const uploadId = String(p.get('uploadId') ?? '').replace(/[^A-Za-z0-9]/g, '')
+  if (!uploadId || uploadId.length < 8 || uploadId.length > 64) {
+    return badRequest('uploadId 不合法', { req })
+  }
+
+  const index = Number(p.get('index'))
+  const total = Number(p.get('total'))
+  const size = Number(p.get('size'))
+  if (!Number.isInteger(index) || index < 0) return badRequest('index 不合法', { req })
+  if (!Number.isInteger(total) || total < 1 || total > MAX_CHUNKS) {
+    return badRequest(`分片数不合法（1–${MAX_CHUNKS}）`, { req })
+  }
+  if (index >= total) return badRequest('index 超出分片数', { req })
+  if (!Number.isFinite(size) || size <= 0 || size > MAX_FILE_BYTES) {
+    return badRequest(`文件过大（上限 ${MAX_FILE_BYTES / 1024 / 1024}MB）。`
+      + '更大的文件请用命令行入库：node scripts/ingest.mjs "<目录>"', { req })
+  }
+
+  // 第一个分片带文件名与路径；后续分片沿用存档的元数据
+  const { name, relPath, error } = parseNameAndPath(req, url)
+  const store = await getDocsStore(STORES.INBOX)
+
+  let meta = await store.get(`chunk-meta/${uploadId}`, { type: 'json' }).catch(() => null)
+
+  if (!meta) {
+    if (error) return error
+    meta = {
+      uploadId,
+      name,
+      relPath,
+      total,
+      size,
+      received: [],
+      createdAt: new Date().toISOString(),
+    }
+  } else {
+    // 后续分片：元数据以第一次为准，不一致说明客户端搞混了两批
+    if (meta.total !== total || meta.size !== size) {
+      return badRequest('分片参数与首次不一致（total/size 变了）', { req })
+    }
+  }
+
+  let buf
+  try {
+    buf = Buffer.from(await req.arrayBuffer())
+  } catch {
+    return badRequest('读取分片失败', { req })
+  }
+  if (buf.length === 0) return badRequest('分片内容为空', { req })
+  if (buf.length > MAX_SINGLE_BYTES) {
+    return badRequest(`分片过大（${(buf.length / 1024 / 1024).toFixed(1)}MB > `
+      + `${MAX_SINGLE_BYTES / 1024 / 1024}MB）`, { req })
+  }
+
+  await store.set(`chunk/${uploadId}/${String(index).padStart(3, '0')}`, buf)
+  if (!meta.received.includes(index)) meta.received.push(index)
+  meta.updatedAt = new Date().toISOString()
+  await store.set(`chunk-meta/${uploadId}`, JSON.stringify(meta))
+
+  return ok({
+    uploadId,
+    received: meta.received.length,
+    total,
+    complete: meta.received.length === total,
+  }, { req })
+}
+
+/**
+ * 合流：把分片拼回整份文件，走与单次上传完全相同的入库前处理。
+ *
+ * @param {Request} req - 请求
+ * @param {URL} url - URL
+ * @returns {Promise<Response>} 响应
+ */
+async function completeChunks(req, url) {
+  const uploadId = String(url.searchParams.get('uploadId') ?? '').replace(/[^A-Za-z0-9]/g, '')
+  if (!uploadId) return badRequest('缺少 uploadId', { req })
+
+  const store = await getDocsStore(STORES.INBOX)
+  const meta = await store.get(`chunk-meta/${uploadId}`, { type: 'json' }).catch(() => null)
+  if (!meta) return notFound('没有这个上传任务（可能已过期或已合流）', { req })
+
+  const age = Date.now() - Date.parse(meta.createdAt)
+  if (!Number.isFinite(age) || age > CHUNK_TTL_MS) {
+    await dropChunks(store, uploadId).catch(() => {})
+    return badRequest('这个上传任务已过期，请重新上传该文件', { req })
+  }
+
+  const missing = []
+  for (let i = 0; i < meta.total; i++) {
+    if (!meta.received.includes(i)) missing.push(i)
+  }
+  if (missing.length > 0) {
+    return badRequest(`还有 ${missing.length} 个分片没到（缺第 ${missing.slice(0, 10).join(',')} 片），`
+      + '请重新上传该文件', { req })
+  }
+
+  // 按序号读回来拼装
+  const parts = []
+  for (let i = 0; i < meta.total; i++) {
+    const key = `chunk/${uploadId}/${String(i).padStart(3, '0')}`
+    const part = await store.get(key, { type: 'arrayBuffer' }).catch(() => null)
+    if (!part) return badRequest(`第 ${i} 片读不出来，请重新上传该文件`, { req })
+    parts.push(Buffer.from(part))
+  }
+
+  const buf = Buffer.concat(parts)
+  if (buf.length !== meta.size) {
+    return badRequest(`拼接后大小不符（${buf.length} ≠ ${meta.size}），请重新上传该文件`, { req })
+  }
+
+  const res = await saveUpload(req, meta.name, meta.relPath ?? '', buf)
+  await dropChunks(store, uploadId).catch(() => {})
+  return res
+}
+
+/**
+ * 丢弃一次上传任务的分片（完成后清理，或用户取消）。
+ *
+ * @param {Request} req - 请求
+ * @param {URL} url - URL
+ * @returns {Promise<Response>} 响应
+ */
+async function abortChunks(req, url) {
+  const uploadId = String(url.searchParams.get('uploadId') ?? '').replace(/[^A-Za-z0-9]/g, '')
+  if (!uploadId) return badRequest('缺少 uploadId', { req })
+  const store = await getDocsStore(STORES.INBOX)
+  const n = await dropChunks(store, uploadId)
+  return ok({ uploadId, removed: n }, { req })
+}
+
+/**
+ * 删除某个上传任务的全部分片与元数据。
+ * @param {object} store - inbox store
+ * @param {string} uploadId - 上传任务 id
+ * @returns {Promise<number>} 删掉的 blob 数
+ */
+async function dropChunks(store, uploadId) {
+  let n = 0
+  const listed = await store.list({ prefix: `chunk/${uploadId}/`, limit: 1000 }).catch(() => ({ blobs: [] }))
+  for (const blob of listed.blobs ?? []) {
+    await store.delete(blob.key).catch(() => {})
+    n += 1
+  }
+  await store.delete(`chunk-meta/${uploadId}`).catch(() => {})
+  return n
 }
 
 /**
