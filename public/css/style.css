@@ -497,6 +497,77 @@ body.list-page {
   letter-spacing: 0;
 }
 
+/* ============================================================
+   来源目录树
+   ============================================================ */
+
+.dir-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* 目录再深也不让侧栏横向滚动：缩进到 6 级之后压住 */
+  overflow: hidden;
+}
+
+.dir-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  /* 每级缩进由行内 --depth 控制；超过 6 级不再继续缩进，避免把名字挤没 */
+  padding-left: calc(min(var(--depth, 0), 6) * 11px);
+  border-radius: 2px;
+}
+.dir-row:hover { background: var(--panel-2); }
+.dir-row.active { background: var(--accent-soft); }
+.dir-row.active .dir-name { color: var(--text); font-weight: 600; }
+
+.dir-toggle {
+  flex: 0 0 auto;
+  width: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: 10px/1 var(--font-mono);
+  cursor: pointer;
+  text-align: center;
+}
+.dir-toggle:hover { color: var(--accent); }
+.dir-toggle-empty { cursor: default; }
+
+.dir-name {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 3px 6px 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 12.5px/1.5 var(--font-serif);
+  text-align: left;
+  cursor: pointer;
+  /* 长目录名截断，不换行（否则一棵树会被撑成好几屏） */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.dir-name:hover { color: var(--text); }
+.dir-name .n {
+  flex: 0 0 auto;
+  font: 11px/1 var(--font-mono);
+  opacity: .65;
+}
+
+/* 列表行里的来源目录 */
+.doc-dir {
+  font: 11.5px/1 var(--font-mono);
+  color: var(--dim);
+  opacity: .9;
+}
+
 /* 统计行贴顶吸附 */
 .list-head {
   position: sticky;

@@ -24,6 +24,7 @@ import { renderCodePage } from '../code-view.mjs'
 import { renderMarkdownPage } from '../markdown-view.mjs'
 import { isEditableType } from '../file-types.mjs'
 import { plainTextOf, countLines } from '../plain-text.mjs'
+import { dirOf } from '../source-dir.mjs'
 
 /**
  * HTML 预览件的 CSP。
@@ -564,8 +565,11 @@ function toListItem(d) {
     hasText: Boolean(d.hasText),
     needsReview: Boolean(d.needsReview),
     previewKind: d.previewKind,
+    webView: d.webView,
     ingestedAt: d.ingestedAt,
     docCreatedAt: d.docCreatedAt,
+    // 来源目录（由 sourcePath 派生），供「按目录浏览」用
+    dir: dirOf(d.sourcePath),
   }
 }
 

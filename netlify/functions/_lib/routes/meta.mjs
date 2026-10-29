@@ -10,6 +10,7 @@
 import { checkAuth } from '../auth.mjs'
 import { ok, forbidden, unauthorized, serverError } from '../respond.mjs'
 import { readAllMeta, readIndexMeta, readTaxonomy, tally } from '../repo.mjs'
+import { dirOf } from '../source-dir.mjs'
 
 /**
  * 统一鉴权：分类词表与清单都只需 guest（未登录即可，
@@ -125,6 +126,10 @@ export async function manifestRoute(req, url) {
         needsReview: Boolean(d.needsReview),
         ingestedAt: d.ingestedAt,
         docCreatedAt: d.docCreatedAt,
+        // 来源目录：库是扁平的，这一项让前端能画出「按目录浏览」的树。
+        // 由 sourcePath 派生，不单独存（见 _lib/source-dir.mjs）
+        dir: dirOf(d.sourcePath),
+        sourcePath: d.sourcePath ?? '',
       })),
       taxonomy: await readTaxonomy(),
     }

@@ -24,8 +24,12 @@ node scripts/ingest.mjs         # 把 inbox/ 里的文档入库
 node scripts/dev-server.mjs     # 启动 → http://127.0.0.1:8899
 ```
 
-打开 <http://127.0.0.1:8899/>：左侧按分类/格式/标签筛选，顶部搜索框即时筛选，
+打开 <http://127.0.0.1:8899/>：左侧按**来源目录 / 分类 / 格式 / 标签**筛选，顶部搜索框即时筛选，
 **按回车则全文检索正文**；点任意文档进入阅读页，可直接内嵌预览与下载。
+
+「来源目录」是从每份文档的来源路径派生出来的（本机入库的按盘符显示，
+网页上传的归在「上传」下），点父目录会连带子目录一起筛 ——
+所以按文件夹导入的资料，仍然可以按文件夹找回。
 
 入库指定目录（不必先拷进 `inbox/`）：
 
@@ -245,14 +249,15 @@ npm run test:api           # 写操作回归（30 项）
 npm run test:batch         # 批量打标签/改分类（49 项）
 npm run test:edit          # 内容编辑：原件/正文/预览/索引全链路（54 项）
 npm run test:office        # Office 网页视图：Word/Excel/PPT 与 PDF 对照（47 项）
-npm run test:upload        # 整文件夹上传 + 增量同步：改/加/留/删（61 项）
+npm run test:upload        # 整文件夹上传 + 增量同步：改/加/留/删（69 项）
+npm run test:dir           # 按来源目录浏览：路径派生 + 树 + 前缀筛选（37 项）
 npm run test:markdown      # Markdown 双视图（21 项）
 npm run test:dom           # 前端 jsdom 冒烟（55 项）
 npm run test:render        # 真实浏览器渲染检查（CDP，含截图）
 ```
 
 依赖服务器的几项（`test:api` / `test:batch` / `test:edit` / `test:office` /
-`test:upload` / `test:markdown` / `test:dom`）需要先 `npm run dev`。
+`test:upload` / `test:dir` / `test:markdown` / `test:dom`）需要先 `npm run dev`。
 
 两条约定：
 

@@ -23,6 +23,7 @@ const state = {
   category: '',
   tag: '',
   type: '',
+  dir: '',
   reviewOnly: false,
   q: '',
   deep: false,
@@ -34,6 +35,9 @@ const state = {
 
 /** 多选控制器（main 里创建）。 */
 let sel = null
+
+/** 目录树里用户手动展开的节点（跨重绘保留）。 */
+const expandedDirs = new Set()
 
 const SORTERS = {
   recent: (a, b) => String(b.ingestedAt ?? '').localeCompare(String(a.ingestedAt ?? '')),
@@ -75,6 +79,15 @@ function applyFilters(docs) {
   if (state.type) out = out.filter((d) => d.type === state.type)
   if (state.reviewOnly) out = out.filter((d) => d.needsReview)
 
+  // 目录按**前缀**匹配：点父目录会连带子目录里的文档
+  if (state.dir) {
+    const sel = state.dir
+    out = out.filter((d) => {
+      const dir = String(d.dir ?? '')
+      return dir === sel || dir.startsWith(`${sel}/`)
+    })
+  }
+
   const q = state.q.trim().toLowerCase()
   if (q) {
     // 拼音：纯 ASCII 查询额外匹配元数据里预算好的拼音串（jlxz → 简历第一版）
@@ -89,6 +102,104 @@ function applyFilters(docs) {
   }
 
   return [...out].sort(SORTERS[state.sort] ?? SORTERS.recent)
+}
+
+/* ============================================================
+   来源目录树
+   ============================================================ */
+
+/**
+ * 把文档的 `dir` 汇总成目录树。
+ *
+ * 库本身是扁平的（分类 + 标签 + 搜索），但真实资料往往是按文件夹整理的，
+ * 导入之后人想按"我刚导进去的那批"来找。目录信息一直记在 sourcePath 里，
+ * 这里只是把它显出来。
+ *
+ * 树节点的 key 就是完整路径（`E:/学习/资料`），筛选时按前缀匹配，
+ * 所以点父目录会连带子目录一起筛。
+ *
+ * @param {object[]} docs - 文档
+ * @returns {Map<string, {count:number, children:Set<string>, label:string}>} 节点表
+ */
+function buildDirTree(docs) {
+  /** @type {Map<string, {count:number, children:Set<string>, label:string}>} */
+  const nodes = new Map()
+
+  /** 建出某一级节点（含所有祖先）。 */
+  const touch = (full) => {
+    if (nodes.has(full)) return
+    const parts = full.split('/')
+    nodes.set(full, { count: 0, children: new Set(), label: parts[parts.length - 1] })
+    if (parts.length > 1) {
+      const parent = parts.slice(0, -1).join('/')
+      touch(parent)
+      nodes.get(parent).children.add(full)
+    }
+  }
+
+  for (const d of docs) {
+    const dir = String(d.dir ?? '')
+    if (!dir) continue
+    // 逐级累加计数：父目录的数目要含子目录里的文档
+    const parts = dir.split('/')
+    let acc = ''
+    for (const p of parts) {
+      acc = acc ? `${acc}/${p}` : p
+      touch(acc)
+      nodes.get(acc).count += 1
+    }
+  }
+  return nodes
+}
+
+/**
+ * 渲染目录树（只画选中路径的祖先链 + 手动展开的节点）。
+ *
+ * 不做"无限展开"：一个大目录展开几十层会把侧栏撑爆。
+ * 规则是——顶层永远可见；选中项的祖先链自动展开；用户点开的节点也展开。
+ *
+ * @param {Map} nodes - 节点表
+ * @param {string} selected - 当前选中目录
+ * @param {Set<string>} expanded - 用户手动展开的目录
+ * @returns {string} HTML
+ */
+function renderDirTree(nodes, selected, expanded = new Set()) {
+  if (nodes.size === 0) return '<span class="dim">尚无</span>'
+
+  const roots = [...nodes.keys()].filter((k) => !k.includes('/')).sort()
+  const openSet = new Set(expanded)
+  // 选中项的祖先链全部展开
+  if (selected) {
+    const parts = selected.split('/')
+    let acc = ''
+    for (const p of parts) {
+      acc = acc ? `${acc}/${p}` : p
+      openSet.add(acc)
+    }
+  }
+
+  const rows = []
+  const walk = (key, depth) => {
+    const node = nodes.get(key)
+    if (!node) return
+    const hasKids = node.children.size > 0
+    // 顶层默认展开：一进来就能看到 `E:` / `上传` 下面有什么
+    const isOpen = openSet.has(key) || (depth === 0 && !selected) || (depth === 0 && expanded.size === 0)
+    const isActive = selected === key
+
+    rows.push(`<div class="dir-row${isActive ? ' active' : ''}" style="--depth:${depth}">
+      ${hasKids
+    ? `<button class="dir-toggle" data-dir-toggle="${esc(key)}" aria-label="${isOpen ? '收起' : '展开'}">${isOpen ? '▾' : '▸'}</button>`
+    : '<span class="dir-toggle dir-toggle-empty"></span>'}
+      <button class="dir-name" data-facet="dir" data-value="${esc(key)}" title="${esc(key)}">${esc(node.label)}<span class="n">${node.count}</span></button>
+    </div>`)
+
+    if (!isOpen) return
+    for (const child of [...node.children].sort()) walk(child, depth + 1)
+  }
+
+  for (const r of roots) walk(r, 0)
+  return rows.join('')
 }
 
 /* ============================================================
@@ -126,7 +237,19 @@ function renderFacets(docs) {
 
   const reviewCount = docs.filter((d) => d.needsReview).length
 
+  // ---- 来源目录：库是扁平的，这一块把 sourcePath 里的目录层级显出来 ----
+  const dirTree = buildDirTree(docs)
+  const dirHtml = renderDirTree(dirTree, state.dir, expandedDirs)
+
   el.facets.innerHTML = `
+    <section class="facet">
+      <h3>来源目录
+        <button class="tip" type="button" data-tip="文档原本所在的文件夹（来自入库时的来源路径）。点目录筛选，父目录包含子目录。网页上传的文件归在「上传」下，本机命令入库的按盘符显示。">?</button>
+        ${state.dir ? `<button class="facet-act" data-facet="dir" data-value="">清除</button>` : ''}
+      </h3>
+      <div class="dir-tree">${dirHtml}</div>
+    </section>
+
     <section class="facet">
       <h3>分类
         <button class="tip" type="button" data-tip="受控词表里的分类，可多选。分类由入库时自动判定，判错了到阅读页「详情 → 编辑元数据」修正。">?</button>
@@ -174,6 +297,17 @@ function renderFacets(docs) {
     openTagManager({ onChanged: () => refreshManifest() })
   })
 
+  // 目录树的展开/收起（只重绘本区，不重新拉数据）
+  el.facets.querySelectorAll('[data-dir-toggle]').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      const key = btn.dataset.dirToggle
+      if (expandedDirs.has(key)) expandedDirs.delete(key)
+      else expandedDirs.add(key)
+      renderFacets(state.manifest?.docs ?? [])
+    })
+  })
+
   el.facets.querySelectorAll('[data-facet]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const kind = btn.dataset.facet
@@ -182,6 +316,11 @@ function renderFacets(docs) {
       else if (kind === 'tag') state.tag = state.tag === value ? '' : value
       else if (kind === 'type') state.type = state.type === value ? '' : value
       else if (kind === 'review') state.reviewOnly = !state.reviewOnly
+      else if (kind === 'dir') {
+        state.dir = state.dir === value ? '' : value
+        // 选中目录时自动展开它的祖先链，否则点了看不出发生了什么
+        if (state.dir) expandedDirs.add(state.dir)
+      }
       render()
     })
   })
@@ -204,6 +343,15 @@ function docRow(doc) {
     fmtDate(doc.docCreatedAt || doc.ingestedAt),
   ].filter(Boolean)
 
+  // 来源目录：只显示最后两级，太长会把一行挤爆（完整路径在 title 里）
+  const dirShort = (() => {
+    const dir = String(doc.dir ?? '')
+    if (!dir) return ''
+    const parts = dir.split('/')
+    const tail = parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : dir
+    return `<span class="doc-dir" title="${esc(dir)}">${esc(tail)}</span>`
+  })()
+
   const selecting = sel?.isActive()
   const checked = selecting && sel.has(doc.id)
 
@@ -218,6 +366,7 @@ function docRow(doc) {
           <div class="doc-meta">
             ${metaBits.map((b) => `<span>${b}</span>`).join('<i>·</i>')}
             ${(doc.categories ?? []).length ? `<i>·</i><span class="cats">${doc.categories.map(esc).join(' / ')}</span>` : ''}
+            ${dirShort ? `<i>·</i>${dirShort}` : ''}
           </div>
           ${tags ? `<div class="doc-tags">${tags}</div>` : ''}
         </div>

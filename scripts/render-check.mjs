@@ -223,6 +223,15 @@ const LIST_PROBE = `(() => {
     stats: document.getElementById('stats')?.textContent?.trim() ?? null,
     searchBox: box('#search'),
     listHeadPosition: style('.list-head', 'position'),
+
+    // 来源目录树：行数、行高，以及侧栏有没有被长路径撑出横向滚动
+    dirRows: document.querySelectorAll('.dir-row').length,
+    dirRowBox: box('.dir-row'),
+    dirTreeBox: box('.dir-tree'),
+    sidebarScrollW: side ? side.scrollWidth : null,
+    sidebarClientW: side ? side.clientWidth : null,
+    dirNames: [...document.querySelectorAll('.dir-name')]
+      .map((b) => b.getAttribute('title') ?? b.textContent.trim()).slice(0, 6),
   }
 })()`
 
@@ -256,6 +265,10 @@ async function checkList(client) {
   line('筛选切面数', r.chipCount)
   line('统计行', `${r.stats}（position: ${r.listHeadPosition}）`)
   line('搜索框', r.searchBox ? `${r.searchBox.w}×${r.searchBox.h}` : '缺失')
+  line('来源目录树', r.dirRows > 0
+    ? `${r.dirRows} 行，高 ${r.dirTreeBox?.h ?? 0}px　${r.dirNames.join(' / ')}`
+    : '（库里没有来源目录信息）')
+  line('侧栏滚动宽/可视宽', `${r.sidebarScrollW} / ${r.sidebarClientW}`)
 
   const issues = []
   if (!r.cssLoaded) issues.push('CSS 未生效（body 背景透明）')
@@ -277,6 +290,14 @@ async function checkList(client) {
   if (r.docCount < 1) issues.push('没有渲染出任何文档卡片')
   if (r.chipCount < 3) issues.push('筛选切面太少')
   if (r.listHeadPosition !== 'sticky') issues.push('统计行应当贴顶吸附')
+
+  // 来源目录树：库里有文档就该有目录节点；长路径不能把侧栏撑出横向滚动
+  if (r.docCount > 0 && r.dirRows === 0) issues.push('有文档却没有渲染出来源目录树')
+  if (r.dirRows > 0 && (r.dirRowBox?.h ?? 0) < 10) issues.push('目录行高度塌陷')
+  if (r.sidebarScrollW && r.sidebarClientW && r.sidebarScrollW > r.sidebarClientW + 2) {
+    issues.push(`侧栏被撑出横向滚动（内容宽 ${r.sidebarScrollW} > 可视 ${r.sidebarClientW}）`
+      + ' —— 长目录名没截断')
+  }
 
   // ---- 独立滚动：滚右边，左边不该跟着动 ----
   // ★ 只有内容真的超出可视高度时才谈得上「能滚」，而且**能滚的距离**
