@@ -418,6 +418,166 @@ async function testBrowserFolderPicker() {
 }
 
 /* ============================================================
+   增量同步：改一个 / 加一个 / 留一个
+   ============================================================ */
+
+/**
+ * 找库里的某份文档。
+ * @param {string} originalName - 原始文件名
+ * @returns {Promise<object|null>} 文档列表项
+ */
+async function findDoc(originalName) {
+  const list = await api('/api/v1/docs?limit=200')
+  return (list.body?.data?.items ?? []).find((d) => d.originalName === originalName) ?? null
+}
+
+/**
+ * 数库里有几份同名的文档（用来证明「替换」而不是「又多了一份」）。
+ * @param {string} originalName - 原始文件名
+ * @returns {Promise<object[]>} 匹配的文档
+ */
+async function findAllDocs(originalName) {
+  const list = await api('/api/v1/docs?limit=200')
+  return (list.body?.data?.items ?? []).filter((d) => d.originalName === originalName)
+}
+
+/**
+ * 整目录「增量同步」的端到端验证。
+ *
+ * 这正是用户会问的那个问题：整个文件夹拖过一次之后，**改了几个、加了几个**，
+ * 难道每次都要全量重传？期望行为是：
+ *   - 没变的：**根本不上传**（本地算哈希，库里已有就跳过）
+ *   - 改了的：上传，入库时按路径**替换**旧版本（不是多出一份）
+ *   - 新增的：上传，入库新增
+ *   - 从目录里消失的：**只报告不删除**（自动删是危险动作）
+ */
+async function testIncrementalSync() {
+  console.log('\n【增量同步：改一个 / 加一个 / 留一个】')
+
+  await cleanStaging()
+
+  const root = `SYNC${Date.now()}`
+  const keepName = `${root}-keep.md`
+  const editName = `${root}-edit.md`
+  const addName = `${root}-add.md`
+
+  const v1Keep = `${root} 这份文件不动，内容一`
+  const v1Edit = `${root} 这份要改，旧内容`
+  const v2Edit = `${root} 这份要改，新内容已更新`
+  const addContent = `${root} 这是第二轮新增的文件`
+
+  const item = (name, content) => ({
+    file: makeFile(content, name, `${root}/${name}`),
+    relPath: `${root}/${name}`,
+  })
+
+  const { ctl, banner, errors } = await mountUploadUi()
+
+  // ---- 第一轮：两份都上传 ----
+  const round1 = await ctl.handleFiles([item(keepName, v1Keep), item(editName, v1Edit)], `文件夹 ${root}/`)
+  check(round1.toSend === 2, `第一轮上传 2 个（实际 ${round1.toSend}）`, JSON.stringify(round1.planned))
+  for (const it of (await api('/api/v1/inbox')).body?.data?.items ?? []) stagedIds.add(it.id)
+
+  const { code: c1, output: o1 } = await processPending(['--no-ai'])
+  check(c1 === 0, `第一轮入库退出码 ${c1}`)
+  if (!/入库 2 份/.test(o1)) console.log(`      （${o1.split('\n').filter((l) => l.trim()).slice(-6).join(' / ')}）`)
+
+  const keepBefore = await findDoc(keepName)
+  const editBefore = await findDoc(editName)
+  check(Boolean(keepBefore && editBefore), '第一轮入库了 2 份')
+  if (!keepBefore || !editBefore) return
+
+  console.log(`      入库后：keep=${keepBefore.id} edit=${editBefore.id}`)
+
+  // ---- 第二轮：改一份、加一份、留一份 ----
+  const round2 = await ctl.handleFiles([
+    item(keepName, v1Keep),        // 没变
+    item(editName, v2Edit),        // 改了
+    item(addName, addContent),     // 新增
+  ], `文件夹 ${root}/`)
+
+  const text2 = banner.textContent.replace(/\s+/g, ' ').trim()
+  check(round2.checked === 3, `本轮检查了 3 个文件（实际 ${round2.checked}）`)
+  check(round2.toSend === 2, `只需要上传 2 个（未变的那份不上传，实际 ${round2.toSend}）`)
+  check(round2.planned?.unchanged === 1, `报告「未变 1」（实际 ${round2.planned?.unchanged}）`, JSON.stringify(round2.planned))
+  check(round2.planned?.replace === 1, `报告「替换 1」（实际 ${round2.planned?.replace}）`, JSON.stringify(round2.planned))
+  check(round2.planned?.new === 1, `报告「新增 1」（实际 ${round2.planned?.new}）`, JSON.stringify(round2.planned))
+  check(/未变 1/.test(text2) && /替换 1/.test(text2) && /新增 1/.test(text2),
+    '汇总文案里说清了新增/替换/未变', text2.slice(0, 220))
+
+  // 未变的那份不该再进暂存区
+  const stagingAfter2 = (await api('/api/v1/inbox')).body?.data?.items ?? []
+  for (const it of stagingAfter2) stagedIds.add(it.id)
+  const stagedNames = stagingAfter2.map((it) => it.originalName)
+  check(!stagedNames.includes(keepName), '没变的文件没有被重新上传', stagedNames.join(' | '))
+  check(stagedNames.includes(editName) && stagedNames.includes(addName), '改的与新增的都进了暂存区')
+
+  // ---- 入库：改的那份要「替换」，不是「多一份」 ----
+  const { code: c2, output: o2 } = await processPending(['--no-ai'])
+  check(c2 === 0, `第二轮入库退出码 ${c2}`)
+  if (!/入库 2 份/.test(o2)) console.log(`      （${o2.split('\n').filter((l) => l.trim()).slice(-6).join(' / ')}）`)
+
+  const keepAfter = await findAllDocs(keepName)
+  const editAfter = await findAllDocs(editName)
+  const addAfter = await findAllDocs(addName)
+
+  check(keepAfter.length === 1 && keepAfter[0].id === keepBefore.id,
+    `没变的文档没被重建（id 仍是 ${keepBefore.id}，实际 ${keepAfter.map((d) => d.id).join(',')}）`)
+  check(editAfter.length === 1,
+    `改过的文件**只有一份**文档（替换而非新增，实际 ${editAfter.length} 份）`,
+    editAfter.map((d) => `${d.id}/${d.title}`).join(' | '))
+  check(editAfter[0]?.id !== editBefore.id, '改过的文档 id 已更新（内容寻址）')
+  check(addAfter.length === 1, `新增的文件入库了（实际 ${addAfter.length} 份）`)
+
+  // 内容确实换了
+  if (editAfter[0]) {
+    const t = await api(`/api/v1/docs/${editAfter[0].id}/text`)
+    const body = (t.body?.data?.pages ?? []).join('')
+    check(body.includes('新内容已更新'), '文档正文是**新内容**')
+    check(!body.includes('旧内容'), '文档正文里没有旧内容')
+    const detail = await api(`/api/v1/docs/${editAfter[0].id}`)
+    check(
+      String(detail.body?.data?.sourcePath ?? '').endsWith(`${root}/${editName}`),
+      `替换后仍记着同一个来源路径（下次同步还能认出它）`,
+      detail.body?.data?.sourcePath,
+    )
+  }
+
+  // ---- 第三轮：完全没变 → 一个字节都不该上传 ----
+  const round3 = await ctl.handleFiles([
+    item(keepName, v1Keep),
+    item(editName, v2Edit),
+    item(addName, addContent),
+  ], `文件夹 ${root}/`)
+
+  const text3 = banner.textContent.replace(/\s+/g, ' ').trim()
+  check(round3.toSend === 0, `全部未变时不上传任何文件（实际 ${round3.toSend}）`)
+  check(round3.planned?.unchanged === 3, `报告「未变 3」（实际 ${round3.planned?.unchanged}）`)
+  check(/不需要上传/.test(text3), '明确告诉用户不用传', text3.slice(0, 160))
+  check(((await api('/api/v1/inbox')).body?.data?.total ?? 0) === 0, '暂存区保持为空')
+
+  // ---- 第四轮：少了一个文件 → 只报告，不自动删 ----
+  const round4 = await ctl.handleFiles([item(keepName, v1Keep), item(editName, v2Edit)], `文件夹 ${root}/`)
+  const missing = round4.planned?.missing ?? []
+  check(missing.length === 1, `报告「库里另有 1 份这次没出现」（实际 ${missing.length}）`,
+    JSON.stringify(missing))
+  check(String(missing[0]?.path ?? '').endsWith(addName), `报告的正是少掉的那份（${missing[0]?.path}）`)
+
+  const stillThere = await findAllDocs(addName)
+  check(stillThere.length === 1, '库里那份**没有被自动删除**（删除要人来决定）')
+
+  check(errors.length === 0, '无 jsdom 报错', errors.join(' | '))
+
+  // 收尾：删掉本轮入库的文档
+  for (const name of [keepName, editName, addName]) {
+    for (const d of await findAllDocs(name)) {
+      await api(`/api/v1/docs/${d.id}`, { method: 'DELETE' })
+    }
+  }
+  console.log('  （已清理本轮入库的文档）')
+}
+
+/* ============================================================
    入库阶段：来源路径
    ============================================================ */
 
@@ -452,25 +612,26 @@ async function processPending(args = []) {
 async function testIngestProvenance() {
   console.log('\n【入库：来源路径写进 sourcePath】')
 
-  // 此时暂存区里只剩上一步上传的那 2 份，不会误处理到别的记录
+  // 自己造数据，不依赖前面用例留下的暂存记录（否则一改顺序就废）
+  await cleanStaging()
+  const root = `PROV${Date.now()}`
+  const name = `${root}-note.md`
+  const up = await upload(`${root}/${name}`, `${root} 来源路径测试`)
+  check(up.status === 200, `上传成功（${up.status}）`)
+
   const { code, output } = await processPending(['--no-ai'])
   check(code === 0, `process-pending 退出码 ${code}`)
-  if (!/入库 2 份/.test(output)) {
-    console.log(`      （process-pending 输出：\n${output.split('\n').filter((l) => l.trim()).map((l) => `      ${l}`).join('\n')}）`)
+  if (!/入库 1 份/.test(output)) {
+    console.log(`      （process-pending 输出：${output.split('\n').filter((l) => l.trim()).slice(-4).join(' / ')}）`)
   }
 
-  const list = await api('/api/v1/docs?limit=200')
-  const docs = (list.body?.data?.items ?? []).filter(
-    (d) => d.originalName === `${MARK}-a.txt` || d.originalName === `${MARK}-b.md`,
-  )
-  check(docs.length === 2, `入库了 ${docs.length} 份测试文档（期望 2）`,
-    `库里现有 originalName：${(list.body?.data?.items ?? []).map((d) => d.originalName).join(' | ')}`)
+  const docs = await findAllDocs(name)
+  check(docs.length === 1, `入库了 ${docs.length} 份测试文档（期望 1）`)
   if (docs.length === 0) return
 
   const detail = await api(`/api/v1/docs/${docs[0].id}`)
   const sp = String(detail.body?.data?.sourcePath ?? '')
-  check(sp.startsWith('upload://'), `sourcePath 记录了上传来源（${sp}）`)
-  check(sp.includes(MARK), 'sourcePath 里带着上传时的相对路径')
+  check(sp === `upload://${root}/${name}`, `sourcePath 是上传时的相对路径（${sp}）`)
 
   // 收尾：删掉测试文档
   for (const d of docs) {
@@ -497,6 +658,7 @@ async function main() {
     await testApi()
     await testBrowserCollect()
     await testBrowserFolderPicker()
+    await testIncrementalSync()
     await testIngestProvenance()
   } finally {
     const n = await cleanStaging()

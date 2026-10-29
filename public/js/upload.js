@@ -48,6 +48,46 @@ const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 /** 并发上传数。串行 100 个文件太慢，全开又会把浏览器连接数打满。 */
 const CONCURRENCY = 3
 
+/** 算哈希的并发数（读文件是 I/O，3 路够用也不至于把磁盘打满）。 */
+const HASH_CONCURRENCY = 3
+
+/**
+ * 在浏览器本地算文件内容的 SHA-256（16 进制）。
+ *
+ * `crypto.subtle` 只在**安全上下文**可用（HTTPS 与 localhost/127.0.0.1）。
+ * 局域网里用 http://192.168.x.x 打开时就拿不到 —— 那种情况下退化成
+ * "全部上传"，功能不受影响，只是失去了"跳过没变的文件"这个优化。
+ *
+ * @param {File} file - 文件
+ * @returns {Promise<string|null>} 十六进制哈希；不可用时返回 null
+ */
+async function sha256Of(file) {
+  const subtle = globalThis.crypto?.subtle
+  if (!subtle) return null
+  try {
+    const buf = await file.arrayBuffer()
+    const digest = await subtle.digest('SHA-256', buf)
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 比对哪些文件需要真的上传。
+ *
+ * @param {Array<{hash:string, path:string}>} files - 待比对
+ * @param {string} root - 根目录名（用于报告"库里已有但这次没出现"的文档）
+ * @returns {Promise<{items:object[], stats:object, missing:object[]}>} 比对结果
+ */
+async function checkBatch(files, root) {
+  const data = await apiFetch('/api/v1/inbox/check', {
+    method: 'POST',
+    body: { files, root },
+  })
+  return data
+}
+
 /**
  * 系统/临时垃圾文件名（整目录上传时静默跳过）。
  *
@@ -76,6 +116,25 @@ function isNoiseFile(name) {
   if (base.startsWith('~$') || base.startsWith('.~lock.')) return true
   if (base.endsWith('.tmp') || base.endsWith('.crdownload') || base.endsWith('.part')) return true
   return false
+}
+
+/**
+ * 取一批文件的共同根目录名（`合同/2025/xx.pdf` → `合同`）。
+ *
+ * 只用于「库里这个目录下有什么、这次却没出现」这条报告。
+ * 要求所有文件都在同一个根之下，否则返回空串（混着多个目录时不猜）。
+ *
+ * @param {Array<{relPath:string}>} items - 文件列表
+ * @returns {string} 根目录名；无法确定时为空串
+ */
+function rootOf(items) {
+  const roots = new Set()
+  for (const it of items) {
+    const parts = String(it.relPath ?? '').split('/')
+    if (parts.length < 2) return ''   // 有文件不在任何子目录里，不猜
+    roots.add(parts[0])
+  }
+  return roots.size === 1 ? [...roots][0] : ''
 }
 
 /**
@@ -340,28 +399,100 @@ export function mountUpload(opts) {
     button.disabled = true
     if (folderButton) folderButton.disabled = true
 
-    const results = []
-    let done = 0
-
     /**
      * 刷新进度。
-     * @param {string} current - 当前文件名
+     * @param {string} phase - 阶段说明
+     * @param {number} n - 已完成
+     * @param {number} of - 总数
+     * @param {string} current - 当前文件
      */
-    const showProgress = (current) => {
-      const pct = Math.round((done / queue.length) * 100)
+    const showProgress = (phase, n, of, current) => {
+      const pct = of ? Math.round((n / of) * 100) : 0
       banner.innerHTML = `<div class="banner info">
-        <b>正在上传 ${done}/${queue.length}</b>
+        <b>${phase} ${n}/${of}</b>
         ${sourceLabel ? `<span class="dim">（${esc(sourceLabel)}）</span>` : ''}
         <div class="up-progress"><i style="width:${pct}%"></i></div>
-        <span class="dim">${esc(current)}</span>
+        <span class="dim">${esc(current ?? '')}</span>
         ${skipLines.length ? `<div class="dim" style="margin-top:4px">${skipLines.join('；')}</div>` : ''}
-        <div style="margin-top:6px"><button class="btn ghost" id="up-cancel">停止上传</button></div>
+        <div style="margin-top:6px"><button class="btn ghost" id="up-cancel">停止</button></div>
       </div>`
       document.getElementById('up-cancel')?.addEventListener('click', () => {
         cancelled = true
         banner.innerHTML = '<div class="banner warn">正在停止…（已上传的文件会保留在暂存区）</div>'
       })
     }
+
+    /* ---------- 阶段一：本地算哈希，问服务端哪些真的需要传 ---------- */
+    //
+    // 这是「增量同步」的关键：整个文件夹重传一遍是浪费，几百份文件里可能
+    // 只改了两个。内容有没有变只有哈希说了算，而哈希可以在**本地**算
+    // （crypto.subtle，一个字节都不上传），再拿结果去比对。
+    //
+    // 拿不到 crypto.subtle（局域网里用 http:// 打开）时不做比对，
+    // 退化成"全部上传"—— 入库仍会按内容去重，只是白传一遍。
+    let plan = null
+    let hashNote = ''
+
+    if (queue.length > 0) {
+      const hashes = new Array(queue.length).fill(null)
+      let hDone = 0
+      let hCursor = 0
+
+      const hashWorker = async () => {
+        for (;;) {
+          const idx = hCursor
+          hCursor += 1
+          if (idx >= queue.length) return
+          hashes[idx] = await sha256Of(queue[idx].file)
+          hDone += 1
+          if (hDone % 5 === 0 || hDone === queue.length) {
+            showProgress('正在校验内容（不会上传）', hDone, queue.length, queue[idx].relPath)
+          }
+        }
+      }
+
+      showProgress('正在校验内容（不会上传）', 0, queue.length, queue[0].relPath)
+      await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, queue.length) }, hashWorker))
+
+      if (cancelled) {
+        busy = false
+        button.disabled = false
+        if (folderButton) folderButton.disabled = false
+        banner.innerHTML = '<div class="banner warn">已停止（还没上传任何文件）。</div>'
+        return { uploaded: 0, failed: 0, cancelled: true, skipped: {}, planned: null }
+      }
+
+      if (hashes.every(Boolean)) {
+        try {
+          plan = await checkBatch(
+            queue.map((it, i) => ({ hash: hashes[i], path: it.relPath })),
+            rootOf(queue),
+          )
+        } catch (err) {
+          hashNote = `（内容比对失败，已改为全部上传：${err.message}）`
+        }
+      } else {
+        hashNote = '（当前环境不支持本地算哈希，已改为全部上传）'
+      }
+    }
+
+    // 只上传服务端说「需要」的那些
+    let toSend = queue
+    let planStats = null
+    if (plan) {
+      const send = []
+      const counters = { new: 0, replace: 0, unchanged: 0, pending: 0 }
+      plan.items.forEach((r, i) => {
+        counters[r.status] = (counters[r.status] ?? 0) + 1
+        if (r.status === 'new' || r.status === 'replace') send.push(queue[i])
+      })
+      toSend = send
+      planStats = { ...counters, missing: plan.missing ?? [] }
+    }
+
+    /* ---------- 阶段二：真正上传 ---------- */
+    const results = []
+    let done = 0
 
     // 并发上传：慢的是网络往返，串行 100 个文件会让人一直干等
     let cursor = 0
@@ -370,8 +501,8 @@ export function mountUpload(opts) {
         if (cancelled) return
         const idx = cursor
         cursor += 1
-        if (idx >= queue.length) return
-        const it = queue[idx]
+        if (idx >= toSend.length) return
+        const it = toSend[idx]
         try {
           const rec = await uploadOne(it.file, it.relPath)
           results.push({ item: it, rec, error: null })
@@ -379,12 +510,14 @@ export function mountUpload(opts) {
           results.push({ item: it, rec: null, error: String(err?.message ?? err) })
         }
         done += 1
-        showProgress(it.relPath)
+        showProgress('正在上传', done, toSend.length, it.relPath)
       }
     }
 
-    showProgress(queue[0].relPath)
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker))
+    if (toSend.length > 0) {
+      showProgress('正在上传', 0, toSend.length, toSend[0].relPath)
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toSend.length) }, worker))
+    }
 
     busy = false
     button.disabled = false
@@ -404,23 +537,51 @@ export function mountUpload(opts) {
       ? '本地暂存区直接读得到，不需要额外配置。'
       : '需要在项目根目录的 <code>.env</code> 里配好 <code>DOCS_STORE_MODE=remote</code>、<code>SITE_ID</code> 与 <code>NETLIFY_ACCESS_TOKEN</code>。'
 
+    // 增量同步的结果汇总：说清「新增多少、替换多少、跳过了什么」
+    const planLines = []
+    if (planStats) {
+      const bits = []
+      if (planStats.new) bits.push(`新增 ${planStats.new}`)
+      if (planStats.replace) bits.push(`替换 ${planStats.replace}（入库时删旧迎新）`)
+      if (planStats.unchanged) bits.push(`未变 ${planStats.unchanged}（库里已有同内容，跳过上传）`)
+      if (planStats.pending) bits.push(`暂存区已有 ${planStats.pending}`)
+      if (bits.length) planLines.push(bits.join('　·　'))
+    } else if (hashNote) {
+      planLines.push(hashNote)
+    }
+    if (planStats?.missing?.length) {
+      const sample = planStats.missing.slice(0, 5).map((m) => esc(m.path)).join('、')
+      planLines.push(
+        `库里另有 ${planStats.missing.length} 份文档在这个目录下、但这次没出现（可能被删或改名）：`
+        + `${sample}${planStats.missing.length > 5 ? ' …' : ''}`
+        + '<br><span class="dim">它们**不会**被自动删除，需要的话到列表页手动删。</span>',
+      )
+    }
+
+    const nothingToSend = toSend.length === 0
+
     banner.innerHTML = `<div class="banner ${failed.length || cancelled ? 'warn' : 'info'}">
-      <b>已上传 ${doneOk.length} / ${queue.length} 个文件</b>
+      <b>${nothingToSend
+    ? `不需要上传：${queue.length} 个文件都已是最新`
+    : `已上传 ${doneOk.length} / ${toSend.length} 个文件（本次共检查 ${queue.length} 个）`}</b>
       ${cancelled ? '<br>· 已按你的要求停止，剩余文件没有上传' : ''}
+      ${planLines.map((l) => `<br>· ${l}`).join('')}
       ${skipLines.map((l) => `<br>· ${l}`).join('')}
       ${failed.slice(0, 8).map((r) => `<br>✗ ${esc(r.item.relPath)}：${esc(r.error)}`).join('')}
       ${failed.length > 8 ? `<br>✗ 另有 ${failed.length - 8} 个失败` : ''}
       ${dupInLib.length ? `<br>· ${dupInLib.length} 个库里已有同样内容，入库时会自动去重` : ''}
       ${dupPending.length ? `<br>· ${dupPending.length} 个暂存区已有同样内容` : ''}
       <br><br>
-      <b>下一步</b>：文件已存进${staging}，尚未入库。
+      ${nothingToSend
+    ? '<span class="dim">没有任何文件需要上传，所以暂存区没有变化。</span>'
+    : `<b>下一步</b>：文件已存进${staging}，尚未入库。
       在本地运行：<br>
       <code>node scripts/process-pending.mjs</code>
       <br><span class="dim">
         ${stagingHint}
-        <br>重活 —— 抽正文、Office 转 PDF、分类打标 —— 必须在本地跑，
-        线上函数没有 LibreOffice，也扛不住大文件。
-      </span>
+        <br>重排、抽正文、Office 转 PDF、分类打标 —— 这些重活必须在本地跑。
+        <b>已改动的文件会按路径替换旧版本</b>，不会变成两份。
+      </span>`}
       <br><br><button class="btn ghost" id="up-dismiss">知道了</button>
     </div>`
 
@@ -434,6 +595,9 @@ export function mountUpload(opts) {
       uploaded: doneOk.length,
       failed: failed.length,
       cancelled,
+      planned: planStats,
+      checked: queue.length,
+      toSend: toSend.length,
       skipped: {
         unsupported: unsupported.length,
         oversize: oversize.length,

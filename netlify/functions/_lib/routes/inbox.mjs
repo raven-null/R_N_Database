@@ -113,6 +113,14 @@ export async function inboxRoute(req, url, seg) {
   if (response) return response
 
   try {
+    // ---- POST /api/v1/inbox/check ----
+    // 整目录「增量同步」用：客户端先算出每个文件的 SHA-256，来这里比对，
+    // 只有没见过的内容才需要真的上传。
+    if (seg.length === 1 && seg[0] === 'check') {
+      if (req.method !== 'POST') return badRequest('比对接口只接受 POST', { req })
+      return checkBatch(req)
+    }
+
     // ---- DELETE /api/v1/inbox/{id} ----
     if (seg.length > 0) {
       if (req.method !== 'DELETE') return badRequest(`${req.method} 不支持`, { req })
@@ -126,6 +134,125 @@ export async function inboxRoute(req, url, seg) {
   } catch (err) {
     return serverError(err, 'inbox', { req })
   }
+}
+
+/** 一次比对最多接受多少个文件。 */
+const MAX_CHECK_FILES = 2000
+
+/**
+ * 批量比对：这些文件里哪些需要真的上传。
+ *
+ * ## 为什么需要这个接口
+ *
+ * 整个文件夹重传一遍是浪费：几百份文件里可能只改了两个。
+ * 但「有没有变」只有**内容哈希**说了算。于是让浏览器先在本地算
+ * SHA-256（原生 `crypto.subtle`，一个字节都不传），再来这里问：
+ *   - 库里已经有这个内容        → 不用传（`unchanged`）
+ *   - 暂存区已经有这个内容      → 不用传（`pending`）
+ *   - 同一路径在库里、内容变了  → 要传，入库时会**替换**（`replace`）
+ *   - 路径也没见过              → 要传，是新增（`new`）
+ *
+ * 顺带回答一个用户迟早会问的问题：**删掉的文件怎么办**。
+ * 传了 `root` 就返回「库里在这个根目录下、但这次没出现的文档」，
+ * 只报告不动手 —— 自动删除是危险动作，得由人来决定。
+ *
+ * @param {Request} req - 请求
+ * @returns {Promise<Response>} 响应
+ */
+async function checkBatch(req) {
+  let body
+  try {
+    body = await req.json()
+  } catch {
+    return badRequest('请求体不是合法 JSON（应为 { files: [{hash, path}], root? }）', { req })
+  }
+
+  const files = Array.isArray(body?.files) ? body.files : null
+  if (!files) return badRequest('缺少 files 数组', { req })
+  if (files.length > MAX_CHECK_FILES) {
+    return badRequest(`一次最多比对 ${MAX_CHECK_FILES} 个文件（收到 ${files.length} 个）`, { req })
+  }
+
+  const store = await getDocsStore(STORES.INBOX)
+  const [allMeta, pendingRecords] = await Promise.all([
+    readAllMeta().catch(() => []),
+    listPendingRecords(store),
+  ])
+
+  /** 内容哈希 → 库里的文档 */
+  const byHash = new Map()
+  /** 来源路径 → 库里的文档（用于区分「替换」与「新增」） */
+  const byPath = new Map()
+  for (const d of allMeta) {
+    if (d.sha256) byHash.set(d.sha256, d)
+    if (d.sourcePath) byPath.set(String(d.sourcePath), d)
+  }
+
+  /** 内容哈希 → 暂存区记录 */
+  const pendingByHash = new Map()
+  for (const r of pendingRecords) {
+    if (r.sha256) pendingByHash.set(r.sha256, r)
+  }
+
+  const seenPaths = new Set()
+  const items = files.map((f) => {
+    const hash = String(f?.hash ?? '').toLowerCase()
+    const relPath = normalizeRelPath(f?.path) || ''
+    const uploadPath = relPath ? `upload://${relPath}` : ''
+    if (uploadPath) seenPaths.add(uploadPath)
+
+    const doc = byHash.get(hash)
+    if (doc) {
+      const samePath = uploadPath && doc.sourcePath === uploadPath
+      return {
+        hash,
+        path: relPath,
+        status: 'unchanged',
+        docId: doc.id,
+        title: doc.title,
+        // 内容一样但路径不同：入库时会复用同一个文档，只是补一条路径映射
+        movedFrom: samePath ? undefined : (doc.sourcePath || undefined),
+      }
+    }
+
+    const pending = pendingByHash.get(hash)
+    if (pending) return { hash, path: relPath, status: 'pending', pendingId: pending.id }
+
+    const samePath = uploadPath ? byPath.get(uploadPath) : null
+    if (samePath) {
+      return { hash, path: relPath, status: 'replace', docId: samePath.id, title: samePath.title }
+    }
+    return { hash, path: relPath, status: 'new' }
+  })
+
+  // 可选：这个根目录下、库里存在但这次没出现的文档（可能被删或改名）
+  const root = normalizeRelPath(body?.root) || ''
+  let missing = []
+  if (root) {
+    const prefix = `upload://${root}/`
+    missing = allMeta
+      .filter((d) => String(d.sourcePath ?? '').startsWith(prefix))
+      .filter((d) => !seenPaths.has(String(d.sourcePath)))
+      .map((d) => ({
+        id: d.id,
+        path: String(d.sourcePath).slice('upload://'.length),
+        title: d.title,
+      }))
+  }
+
+  const stats = items.reduce((acc, it) => {
+    acc[it.status] = (acc[it.status] ?? 0) + 1
+    return acc
+  }, {})
+
+  return ok({
+    total: items.length,
+    stats,
+    toUpload: items.filter((it) => it.status === 'new' || it.status === 'replace').length,
+    items,
+    missing,
+    note: 'status: unchanged=库里已有同内容 / pending=暂存区已有 / replace=同路径内容变了 / new=新增',
+  }, { req })
 }
 
 /**
