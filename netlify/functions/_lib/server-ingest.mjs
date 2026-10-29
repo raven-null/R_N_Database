@@ -59,22 +59,34 @@ const DEFAULT_PER_CALL = 3
 const TIME_BUDGET_MS = 45_000
 
 /**
- * 取分类词表：优先用库里存的，库里没有就用随构建同步的副本。
+ * 取分类词表。
  *
- * ★ 这个顺序很重要：服务端入库很可能就是**这个库的第一次初始化**，
- * 那时 `doc-index/taxonomy` 还是空的。没有兜底的话，第一次入库会把
- * 所有文档都判成「未归类」。
+ * ★ 优先用**随构建生成的那份**（`taxonomy-default.mjs`，每次构建都从
+ * `config/taxonomy.json` 重新生成），而不是 Blobs 里存的那份。
+ *
+ * 踩过的坑：起初优先读 Blobs，结果给「学习资料」加上关键词「学习」
+ * 并重新部署之后，线上分类**毫无变化** —— 因为 Blobs 里那份是旧运行
+ * 写进去的，一直没被覆盖。这种"改了但没生效"不报任何错，最难查。
+ *
+ * 构建产物永远比运行期缓存新，所以顺序是：
+ *   构建产物 → Blobs（万一构建产物缺失）
+ * 然后把构建产物写回 Blobs，让 /api/v1/taxonomy 与 reclassify 看到同一份。
  *
  * @returns {Promise<object>} 词表
  */
 async function loadTaxonomyForIngest() {
-  const stored = await readTaxonomy().catch(() => null)
-  if (stored?.categories?.length) return stored
+  if (!TAXONOMY_DEFAULT?.categories?.length) {
+    const stored = await readTaxonomy().catch(() => null)
+    return stored ?? TAXONOMY_DEFAULT
+  }
 
-  // 顺手写进 Blobs，让 /api/v1/taxonomy 与后续调用拿到同一份
+  // 顺手把 Blobs 里的那份刷成构建产物（几 KB，一次调用一次写）
   try {
-    const store = await getDocsStore(STORES.INDEX)
-    await store.set('taxonomy', JSON.stringify(TAXONOMY_DEFAULT))
+    const stored = await readTaxonomy().catch(() => null)
+    if (JSON.stringify(stored ?? {}) !== JSON.stringify(TAXONOMY_DEFAULT)) {
+      const store = await getDocsStore(STORES.INDEX)
+      await store.set('taxonomy', JSON.stringify(TAXONOMY_DEFAULT))
+    }
   } catch {
     /* 写不进去不影响本次分类 */
   }
@@ -129,7 +141,21 @@ async function ingestOne(ctx) {
   const ext = rec.ext || (rec.originalName.split('.').pop() ?? '').toLowerCase()
 
   // ---- 分类（只用规则层：函数里不联网、不花钱）----
-  const cls = classifyByRules(title, extracted.text, taxonomy)
+  //
+  // 提示 = 标题 + 文件名 + **来源目录名**。目录名和文件名一样是人起的名字：
+  // `学习/L03_变量.java` 里的「学习」足以说明这是课件。
+  // 不加这一条时，整个 Java 课件目录会全部落到「未归类」——
+  // 正文是纯代码，词表里的分类关键词一个都不沾。
+  //
+  // 取**所有上级目录**（最多 4 级）。relativePath 是相对此次导入根目录的，
+  // 所以每一级都是人起的、有意义的：`学习/L30_面向对象进阶/多态测试/x.java`
+  // 里的「学习」才是关键信号，只取最近一级或两级都会漏掉深层文件。
+  // 实测：只取两级时，两级子目录里的那份会掉回「未归类」。
+  const relParts = String(rec.relativePath ?? '').split('/').filter(Boolean)
+  const dirHint = relParts.slice(0, -1).slice(-4).join(' ')
+  const classifyTitle = dirHint ? `${title} ${dirHint}` : title
+
+  const cls = classifyByRules(classifyTitle, extracted.text, taxonomy)
   const tags = mergeTagsFor(cls.categories, cls.tags, taxonomy)
 
   // ---- 预览件 ----

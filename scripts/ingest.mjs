@@ -25,7 +25,7 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { basename, extname, join, relative, resolve } from 'node:path'
+import { basename, dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadEnv, loadExtraEnv, requireEnv } from './env.mjs'
@@ -255,13 +255,24 @@ export async function ingestOne(filePath, ctx, override = {}) {
   const finalTitle = pickTitle(extracted.title, title)
 
   // ---- 分类打标 ----
-  // 关键：把**文件名**与内嵌标题一起送进分类器。
+  // 关键：把**文件名**、内嵌标题、以及**来源目录名**一起送进分类器。
   // 文件名往往含最有价值的线索（「简历」「发票」「合同」），
   // 而内嵌标题常是垃圾值。只取内嵌标题会让分类失准
   // （实测：一份简历因内嵌标题 about:blank 被误分到「项目文档」）。
+  //
+  // 目录名同样是**人起的名字**：`E:\学习\Java\学习\L03_变量.java` 里的
+  // 「学习」和文件名一样能说明这是什么资料。不加这一条时，一整个
+  // Java 课件目录的 57 个文件会全部落到「未归类」——正文是纯代码，
+  // 词表里的分类关键词一个都不沾。
+  //
+  // 取路径上**最近 4 级**目录：深层子目录里的文件（`学习/L30_进阶/多态测试/x.java`）
+  // 靠更上一级才拿得到「学习」；只取一级或两级都会漏。
+  const dirSegs = dirname(abs).split(/[\\/]/).filter(Boolean)
+  const dirHint = dirSegs.slice(-4).join(' ')
   const titleHints = [
     title,                                                     // 来自文件名
     isJunkTitle(extracted.title) ? '' : extracted.title,        // 内嵌标题（非垃圾才用）
+    dirHint,                                                   // 来源目录名（最近两级）
   ].filter(Boolean).join(' ')
 
   const cls = await classify({

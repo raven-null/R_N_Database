@@ -250,6 +250,22 @@ async function main() {
       `sourcePath 记成 upload://（${mdDetail.body?.data?.sourcePath}）`,
     )
 
+    /* ---------- 目录名参与分类（深层子目录也要生效）---------- */
+    console.log('\n【目录名当命名提示】')
+    // 深层子目录：只取最近一级或两级都拿不到「学习」，必须取全上级目录。
+    // ★ 内容里必须带 MARK：id 是内容哈希，两次运行内容一模一样就会被判为
+    // "库里已有同样内容"（duplicate）而不会新建文档 —— 那样测试就测不到本次的分类。
+    await stage(`${MARK}-deep.java`, `public class Deep${MARK.replace(/\D/g, '')} {\n  int x = 1;\n}\n`,
+      `${root}/学习/L30_面向对象进阶/多态测试/${MARK}-deep.java`)
+    const deepRes = await ingest(10)
+    const deepDoc = await findDoc(`${MARK}-deep.java`)
+    check(Boolean(deepDoc), '深层子目录里的文件入库了')
+    check(deepDoc?.categories?.includes('学习资料'),
+      `深层子目录也认出了「学习」（${deepDoc?.categories?.join('/')}）`,
+      `分类：${deepDoc?.categories?.join('/')}`)
+    check(deepDoc?.tags?.includes('学习'), `拿到「学习」标签（${(deepDoc?.tags ?? []).join(' ')}）`)
+    void deepRes
+
     /* ---------- 幂等：再点一次 ---------- */
     console.log('\n【幂等】')
     const again = await ingest(10)
