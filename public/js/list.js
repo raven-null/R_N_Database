@@ -482,8 +482,9 @@ function render() {
   if (filtered.length === 0) {
     el.results.innerHTML = docs.length === 0
       ? `<div class="empty">尚未入库文档
-          <button class="tip" type="button" data-tip="点右上角「上传」传文件，或把文档放进 inbox/ 后再在本地跑下面的命令。">?</button>
-          <pre class="cmd">node scripts/ingest.mjs</pre></div>`
+          <span class="empty-next">点右上角「上传」传文件，传完在清单里点「立即入库」</span>
+          <button class="tip" type="button" data-tip="网页上传只把原件放进暂存区；入库 = 抽正文 + 分类打标 + 生成预览 + 更新检索索引。&#10;登录后点「立即入库」由服务端完成，不需要在本地跑命令。&#10;若要在服务端拿到 Office 的 PDF 保真预览，得用本地命令 node scripts/ingest.mjs（那条路需要 Netlify 访问令牌，且要在这台机器上跑）。&#10;左侧的「来源目录」是由文档的来源路径长出来的 —— 库里有文档之后才会出现。">?</button>
+        </div>`
       : `<div class="empty">没有符合当前筛选条件的文档
           <button class="tip" type="button" data-tip="把左侧已选中的分类 / 格式 / 标签再点一下取消，或清空检索框。">?</button></div>`
     el.stats.textContent = `0 / ${docs.length} 份`

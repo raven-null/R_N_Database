@@ -155,6 +155,13 @@ code, pre {
   margin-top: 8px;
   vertical-align: -3px;
 }
+/* 空态里那句「下一步该点什么」——是操作指引，不是说明文字 */
+.empty-next {
+  display: block;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
 
 /* 气泡本体：由 hint.js 定位，fixed 才不会在滚动盒里被裁 */
 .tip-bubble {
