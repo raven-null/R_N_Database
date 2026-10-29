@@ -189,24 +189,33 @@ async function readResult(res) {
 
 /**
  * 触发服务端入库，直到暂存区清空。
+ *
+ * ★ 用**上传时拿到的 id 精确点名**，而不是让服务端去 list 暂存区。
+ * 线上实测：Netlify Blobs 的 list() 是最终一致的 —— 57 个文件刚传完
+ * 立刻调入库，服务端 list 出来是 0 份，于是"入库 0 份"。
+ * 按 id 用 get() 读是强一致的，点名就没有这个竞态。
+ *
  * @param {string} base - 站点
  * @param {string} token - ADMIN_TOKEN
+ * @param {string[]} ids - 上传时拿到的记录 id
  * @param {Function} log - 输出
  * @returns {Promise<object>} 统计
  */
-async function runIngest(base, token, log) {
+async function runIngest(base, token, ids, log) {
   const stats = { ingested: 0, duplicate: 0, failed: 0, rounds: 0 }
 
-  for (let round = 0; round < 40; round++) {
+  for (let i = 0; i < ids.length; i += INGEST_BATCH) {
+    const batch = ids.slice(i, i + INGEST_BATCH)
     const res = await fetch(`${base}/api/v1/inbox/ingest`, {
       method: 'POST',
       headers: { 'X-Auth-Token': token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ limit: INGEST_BATCH }),
+      body: JSON.stringify({ ids: batch }),
     })
     const r = await readResult(res)
     if (r.error) {
       log(`  ✗ 入库接口报错：${r.error}`)
-      break
+      stats.failed += batch.length
+      continue
     }
     stats.rounds += 1
     for (const x of r.data.results ?? []) {
@@ -214,8 +223,8 @@ async function runIngest(base, token, log) {
       else if (x.status === 'duplicate') stats.duplicate += 1
       else if (x.status !== 'missing') stats.failed += 1
     }
-    log(`  · 第 ${round + 1} 轮：处理 ${r.data.processed} 份，剩余 ${r.data.remaining} 份`)
-    if (r.data.total === 0 || r.data.remaining <= 0) break
+    const done = Math.min(i + batch.length, ids.length)
+    log(`  · ${done}/${ids.length} 份已交给服务端（本轮处理 ${r.data.processed} 份）`)
   }
   return stats
 }
@@ -275,6 +284,8 @@ async function main() {
   console.log(`【上传】${list.length} 个文件`)
   let okCount = 0
   let failCount = 0
+  /** 上传成功后拿到的暂存记录 id —— 入库时用它精确点名，绕开 list() 的最终一致延迟。 */
+  const uploadedIds = []
   const failures = []
   const startedAt = Date.now()
 
@@ -287,6 +298,7 @@ async function main() {
         failures.push(`${f.rel}：${r.error}`)
       } else {
         okCount += 1
+        if (r.data?.id) uploadedIds.push(r.data.id)
       }
     } catch (err) {
       failCount += 1
@@ -316,7 +328,7 @@ async function main() {
 
   console.log('\n【入库】由服务端抽取正文、分类打标、生成预览、更新索引')
   const ingestStarted = Date.now()
-  const stats = await runIngest(opts.base, opts.token, (m) => console.log(m))
+  const stats = await runIngest(opts.base, opts.token, uploadedIds, (m) => console.log(m))
   const ingestMs = Date.now() - ingestStarted
 
   console.log(`\n  入库 ${stats.ingested} 份 · 重复跳过 ${stats.duplicate} 份 · 失败 ${stats.failed} 份`

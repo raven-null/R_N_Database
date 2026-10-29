@@ -272,14 +272,50 @@ export async function ingestPending(req, url) {
 
   try {
     const inbox = await getDocsStore(STORES.INBOX)
-    const records = await listRecords(inbox)
-    if (records.length === 0) {
-      return ok({ total: 0, processed: 0, remaining: 0, results: [], note: '暂存区是空的。' }, { req })
+
+    // ★ 优先用调用方给的 id 列表（`{ ids: [...] }`）。
+    //
+    // 起因是一个线上真事故：脚本刚把 57 个文件传进暂存区，紧接着调入库，
+    // 结果「处理 0 份」—— 而实际文件都在。原因是 **Netlify Blobs 的
+    // list() 是最终一致的**：写入成功（按 id 能读到、DELETE 能删），
+    // 但紧接着的 list() 还看不到；实测 3 秒后才显示出来。
+    //
+    // 按 id 用 get() 读是强一致的，所以上传方知道自己传了哪些 id 时，
+    // 直接点名，彻底绕开这个延迟。没给 ids 时（界面上的「立即入库」）
+    // 才退回 list()，并重试几次等它追上。
+    const wantIds = Array.isArray(body?.ids)
+      ? body.ids.map((s) => String(s)).filter(Boolean).slice(0, 200)
+      : null
+
+    let records = []
+    if (wantIds) {
+      for (const id of wantIds) {
+        const m = await inbox.get(`meta/${id}`, { type: 'json' }).catch(() => null)
+        // 读不到说明已处理过（记录被删）——不算错
+        if (m && m.status !== 'done') records.push(m)
+      }
+      if (records.length === 0) {
+        return ok({
+          total: 0, processed: 0, ingested: 0, remaining: 0, results: [],
+          note: '这批文件都已经处理过了。',
+        }, { req })
+      }
+    } else {
+      // 界面路径：list() 可能滞后，重试几次（首次尝试 + 3 次间隔 1.2s）
+      for (let attempt = 0; attempt < 4; attempt++) {
+        records = await listRecords(inbox)
+        if (records.length > 0) break
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 1200))
+      }
+      if (records.length === 0) {
+        return ok({ total: 0, processed: 0, ingested: 0, remaining: 0, results: [], note: '暂存区是空的。' }, { req })
+      }
     }
 
     // 先传的先处理
     records.sort((a, b) => String(a.uploadedAt ?? '').localeCompare(String(b.uploadedAt ?? '')))
-    const targets = records.slice(0, limit)
+    // ids 模式：调用方已经控制了批量大小，不必再按 limit 截断
+    const targets = wantIds ? records : records.slice(0, limit)
 
     const taxonomy = await loadTaxonomyForIngest()
     if (!taxonomy?.categories?.length) {
