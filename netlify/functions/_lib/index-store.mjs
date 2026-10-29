@@ -25,7 +25,7 @@
  */
 
 import { getDocsStore, STORES } from './store.mjs'
-import { metaTextOf, termCounts, computeIndexVersion } from './tokenize.mjs'
+import { metaTextOf, termCounts, computeIndexVersion, indexableText } from './tokenize.mjs'
 
 /** 分片数量。取 128：256 份文档时每片约 49KB，一次检索读取量降到约 1/32。 */
 export const SHARD_COUNT = 128
@@ -196,8 +196,8 @@ export async function applyDocChangesBulk(changes) {
       body = (text?.pages ?? []).join('\n')
     }
 
-    const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), body) : new Map()
-    const newTf = newMeta ? termCounts(metaTextOf(newMeta), body) : new Map()
+    const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), indexableText(body)) : new Map()
+    const newTf = newMeta ? termCounts(metaTextOf(newMeta), indexableText(body)) : new Map()
 
     for (const t of oldTf.keys()) touched.add(shardOf(t))
     for (const t of newTf.keys()) touched.add(shardOf(t))
@@ -348,8 +348,8 @@ export async function applyDocChange(opts) {
   const bodyOld = oldBody ?? bodyFromStore
   const bodyNew = newBody ?? bodyFromStore
 
-  const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), bodyOld) : new Map()
-  const newTf = newMeta ? termCounts(metaTextOf(newMeta), bodyNew) : new Map()
+  const oldTf = oldMeta ? termCounts(metaTextOf(oldMeta), indexableText(bodyOld)) : new Map()
+  const newTf = newMeta ? termCounts(metaTextOf(newMeta), indexableText(bodyNew)) : new Map()
 
   // 需要触碰的分片 = 旧词典 ∪ 新词典 所在的分片
   const touched = new Set()

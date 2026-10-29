@@ -55,8 +55,14 @@ import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 const MAX_PER_CALL = 10
 /** 默认处理几份。 */
 const DEFAULT_PER_CALL = 3
-/** 时间预算：留 15 秒给响应与冷启动。 */
-const TIME_BUDGET_MS = 45_000
+/**
+ * 时间预算：在下一份开始前检查，超了就收工、把剩下的留在暂存区。
+ *
+ * 上限不是随便定的 —— Netlify 同步函数硬上限 26 秒，撞线时函数被直接
+ * 掐掉、连响应都没有（客户端只看到 502），而那一刻可能刚写完元数据、
+ * 索引还没更新，库里就留了半份文档。留 8 秒余量给收尾与响应。
+ */
+const TIME_BUDGET_MS = 18_000
 
 /**
  * 取分类词表。

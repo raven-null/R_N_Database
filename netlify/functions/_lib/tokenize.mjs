@@ -206,6 +206,31 @@ export function termCounts(metaText, bodyText) {
 }
 
 /**
+ * 单份文档**参与索引**的正文上限（字符数）。
+ *
+ * 为什么不整本入库：一本 300 多页的中文书有 49 万字、5.7 万个词条，
+ * 写分片的时间直接撞函数执行上限（同步函数 26 秒），整次入库 502 ——
+ * 元数据与原件都写进去了，索引没有，列表里就是偏偏少这一份。
+ * 索引前 6 万字足够支撑「搜得到」，正文仍然完整存在 doc-text 里，
+ * 详情页与 AI 摘要都还能用全文。
+ */
+export const MAX_INDEX_CHARS = 60_000
+
+/**
+ * 截断出「可索引」的正文。
+ *
+ * ★ 增删两侧必须用同一个截断，否则删除时算出来的旧词频与入库时不一致，
+ * 会留下摘不干净的索引孤儿。
+ *
+ * @param {string} body - 正文
+ * @returns {string} 截断后的正文
+ */
+export function indexableText(body) {
+  const s = String(body ?? '')
+  return s.length > MAX_INDEX_CHARS ? s.slice(0, MAX_INDEX_CHARS) : s
+}
+
+/**
  * 构建倒排索引（带词频）。
  *
  * postings 结构：`{ 词条: { 文档id: 词频 } }`
@@ -225,7 +250,7 @@ export function buildIndex(docs, textOf) {
   let totalLength = 0
 
   for (const doc of docs) {
-    const bodyText = textOf ? String(textOf(doc) ?? '') : ''
+    const bodyText = textOf ? indexableText(textOf(doc)) : ''
     const tf = termCounts(metaTextOf(doc), bodyText)
 
     let docLen = 0
