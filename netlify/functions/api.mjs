@@ -26,6 +26,7 @@ import { taxonomyRoute, manifestRoute } from './_lib/routes/meta.mjs'
 import { authRoute } from './_lib/routes/auth.mjs'
 import { batchRoute, tagRenameRoute, tagDeleteRoute, tagStatsRoute } from './_lib/routes/docs-batch.mjs'
 import { inboxRoute } from './_lib/routes/inbox.mjs'
+import { exportRoute } from './_lib/routes/export.mjs'
 import { repairIndex } from './_lib/index-repair.mjs'
 import { checkAuth } from './_lib/auth.mjs'
 import { badRequest, forbidden, notFound, preflight, serverError } from './_lib/respond.mjs'
@@ -84,6 +85,11 @@ export default async (req) => {
 
       case 'search':
         return await searchRoute(req, url)
+
+      case 'export':
+        // POST /export          生成全库备份 zip（admin）
+        // GET  /export/{id}     下载备份件
+        return await exportRoute(req, url, seg.slice(1))
       case 'taxonomy':
         return await taxonomyRoute(req, url)
       case 'manifest':

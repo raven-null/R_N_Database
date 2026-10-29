@@ -303,6 +303,86 @@ function checkEnvValueLeaks() {
 /* ============================================================
    主流程
    ============================================================ */
+
+/**
+ * 生成 `_lib/build-info.mjs`：把这版代码的 commit / 分支 / Node 版本写进函数。
+ *
+ * ## 为什么需要
+ *
+ * 这次排查里最浪费时间的一类对话是「我改的代码到底上线没有？」——
+ * Netlify 的 `COMMIT_REF` 只在**构建期**有值，函数运行时读到的是空，
+ * 于是 `/health` 里那一行永远是 null，只能靠 behavioural 试探。
+ *
+ * 构建命令 `node scripts/check.mjs` 在打包之前执行，此刻把 commit 写成
+ * 一个普通模块，函数静态 import 它，就能在线上如实回报「我是哪一版」。
+ *
+ * ## 为什么不让它每次都变
+ *
+ * `builtAt` 如果每次本地跑 check 都刷新，生成文件会天天变动、把 diff 弄脏。
+ * 所以只有 commit / 分支 / Node 变了才重写；同一版重复构建保持第一次的时间。
+ *
+ * @returns {void}
+ */
+function generateBuildInfo() {
+  const dst = join(ROOT, 'netlify', 'functions', '_lib', 'build-info.mjs')
+
+  const git = (args) => {
+    try {
+      return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim()
+    } catch {
+      return ''
+    }
+  }
+
+  const commit = (process.env.COMMIT_REF || git(['rev-parse', 'HEAD']) || '').slice(0, 40)
+  const branch = process.env.BRANCH || process.env.HEAD || git(['rev-parse', '--abbrev-ref', 'HEAD']) || ''
+  const node = process.version.replace(/^v/, '')
+  const dirty = (() => {
+    try {
+      return execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim().length > 0
+    } catch {
+      return false
+    }
+  })()
+
+  // 同一版就别重写，保住原来的 builtAt
+  if (existsSync(dst)) {
+    const prev = readFileSync(dst, 'utf8')
+    const same = prev.includes(`commit: '${commit.slice(0, 12)}'`)
+      && prev.includes(`branch: '${branch}'`)
+      && prev.includes(`node: '${node}'`)
+    if (same) {
+      note(`构建信息：${commit.slice(0, 7) || '(无 git)'} @ ${node}（未变，沿用）`)
+      return
+    }
+  }
+
+  const body = `/**
+ * 构建信息（供 /api/v1/health 回报）。
+ *
+ * ⚠ 由 scripts/check.mjs **自动生成**，不要手改。
+ * 存在的唯一目的：让"线上跑的到底是哪一版代码"这个问题有一个确定答案。
+ *
+ * @module netlify/functions/_lib/build-info
+ */
+
+export default {
+  commit: '${commit.slice(0, 12)}',
+  branch: '${branch}',
+  node: '${node}',
+  builtAt: '${new Date().toISOString()}',
+  dirty: ${dirty},
+}
+`
+
+  try {
+    writeFileSync(dst, body, 'utf8')
+    note(`已生成构建信息 _lib/build-info.mjs（${commit.slice(0, 7) || '无 git'} @ ${node}）`)
+  } catch (err) {
+    fail(`写 build-info.mjs 失败：${err.message}`)
+  }
+}
+
 /**
  * 把分类词表同步给函数侧（`_lib/taxonomy-default.mjs`）。
  *
@@ -380,6 +460,7 @@ async function main() {
   checkEnvValueLeaks()
   checkOptionalTools()
   syncTaxonomyForFunctions()
+  generateBuildInfo()
 
   for (const n of notes) console.log(`  · ${n}`)
   for (const w of warnings) console.log(`  ⚠ ${w}`)

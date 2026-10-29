@@ -40,7 +40,9 @@
     "test:serve": "node scripts/test-server-ingest.mjs",
     "process-pending": "node scripts/process-pending.mjs",
     "test:batch": "node scripts/test-batch-tags.mjs",
-    "test:access": "node scripts/test-access.mjs"
+    "test:access": "node scripts/test-access.mjs",
+    "test:export": "node scripts/test-export.mjs",
+    "doctor": "node scripts/doctor.mjs"
   },
   "devDependencies": {
     "@pagus-kit/core": "^0.1.1",

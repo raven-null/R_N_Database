@@ -37,6 +37,8 @@ export const STORES = {
   INDEX: 'doc-index',
   /** 密码哈希 + 令牌表 —— 沿用图库 auth-config 做法 */
   AUTH: 'doc-auth',
+  /** 导出/备份的 zip 暂存（下载后即可清） */
+  EXPORTS: 'doc-exports',
   /**
    * 待处理的上传暂存区。
    *

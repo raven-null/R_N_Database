@@ -8,6 +8,7 @@
  */
 
 import { probeStore, runtimeInfo, resolveStoreMode, STORES } from '../store.mjs'
+import BUILD_INFO from '../build-info.mjs'
 import { authStatus } from '../auth.mjs'
 import { allowedOrigins } from '../cors.mjs'
 import { ok, serverError } from '../respond.mjs'
@@ -44,11 +45,9 @@ export async function healthRoute(req, url) {
       store: { ...store, stores: Object.values(STORES) },
       auth,
       docCount,
-      // 部署的是哪一版？Netlify 构建时注入 COMMIT_REF。
-      // 曾经因为「改了代码但线上还是旧的」白白排查半天，
-      // 有这一行就能一眼确认函数到底是新是旧。
-      commit: String(process.env.COMMIT_REF ?? '').slice(0, 7) || null,
-      branch: process.env.BRANCH ?? null,
+      // 线上跑的到底是哪一版？由构建期生成的 build-info.mjs 如实回报。
+      // 曾经因为「改了代码但线上还是旧的」白排查半天，这个字段就是答案。
+      build: BUILD_INFO,
       runtime: rt,
       allowedOrigins: allowedOrigins(),
       hints: buildHints(store, auth, rt, docCount),
