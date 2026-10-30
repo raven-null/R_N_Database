@@ -32,6 +32,14 @@ import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 const MAX_DOCS = 400
 
 /**
+ * 每份文档最多喂多少正文字符给分类器。
+ *
+ * 与索引侧同一口径（`tokenize.MAX_INDEX_CHARS` 是 6 万）：体裁信号（参考文献、
+ * 致谢、本章）在书里出现得很早，6 万字足够；再多只是白烧 CPU。
+ */
+const MAX_BODY_CHARS = 60_000
+
+/**
  * 哪些文档不该被自动重分类。
  *
  * @param {object} meta - 元数据
@@ -89,6 +97,7 @@ export async function reclassify(req) {
     const taxonomy = TAXONOMY_DEFAULT
     const folderIndex = await loadFolders()
     const metaStore = await getDocsStore(STORES.META)
+    const textStore = await getDocsStore(STORES.TEXT)
 
     let skippedManual = 0
     let categoriesChanged = 0
@@ -103,14 +112,18 @@ export async function reclassify(req) {
       const dirNames = dirNamesOf(meta, folderIndex)
       // 分类提示 = 标题 + 文件名 + 各级目录名（目录名是人起的，最可信）
       const hint = [meta.title, meta.originalName, ...dirNames].filter(Boolean).join(' ')
-      const bodyText = ''   // 规则分类只需要提示文本；正文在这里不重复读，省时限
 
-      const cls = classifyByRules(hint, bodyText, taxonomy)
+      // ★ 必须把正文也读出来：体裁信号（参考文献/致谢/本章/摘要）全在正文里，
+      //   只给标题的话，一本 307 页的书会被判成「项目文档」—— 这个坑真踩过。
+      const text = await textStore.get(meta.id, { type: 'json' }).catch(() => null)
+      const body = (text?.pages ?? []).join('\n').slice(0, MAX_BODY_CHARS)
+
+      const cls = classifyByRules(hint, body, taxonomy)
       const scored = scoreTags({
         title: String(meta.title ?? ''),
         fileName: String(meta.originalName ?? ''),
         dirNames,
-        body: '',            // 正文权重留给入库时算（那里手上有正文，这里不重复读）
+        body,
         categories: cls.categories,
         taxonomy,
       })
