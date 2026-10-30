@@ -41,6 +41,7 @@ import { convertToPdfDetailed, findLibreOffice as findSoffice, officeEngineStatu
 import { rebuildStoreIndex } from './lib/rebuild-index.mjs'
 import { getDocsStore, STORES, resolveStoreMode } from '../netlify/functions/_lib/store.mjs'
 import { normalizeDoc } from '../netlify/functions/_lib/doc-model.mjs'
+import { scoreTags, tagNames } from '../netlify/functions/_lib/tag-score.mjs'
 import { parseFrontMatter, metaFromFrontMatter } from '../netlify/functions/_lib/front-matter.mjs'
 
 const ROOT = process.cwd()
@@ -357,6 +358,25 @@ export async function ingestOne(filePath, ctx, override = {}) {
     webViewStats = web.stats
   }
 
+  // ---- 标签：按证据打分（目录 > 标题 > 正文次数），过阈值、最多 5 个 ----
+  // 目录层级名（标签打分里"目录命中"用）：网页上传是 upload:// 相对路径，
+  // 命令行扫描是真实路径，两者都切成各级名字
+  const dirSource = override.sourcePath ?? abs
+  const dirNames = String(dirSource)
+    .replace(/^upload:\/\//, '')
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .slice(0, -1)
+  const scoredTags = scoreTags({
+    title: finalTitle,
+    fileName: name,
+    dirNames,
+    body: extracted.text,
+    categories: cls.categories,
+    taxonomy: ctx.taxonomy,
+  })
+  const scoredTagNames = tagNames(scoredTags)
+
   // ---- front matter（Markdown 自己带的元数据优先于人猜的）----
   const fm = type === 'md'
     ? metaFromFrontMatter(parseFrontMatter(buf.toString('utf8')).data)
@@ -389,7 +409,9 @@ export async function ingestOne(filePath, ctx, override = {}) {
     ingestedAt: now,
     updatedAt: now,
     categories: fm?.categories?.length ? fm.categories : cls.categories,
-    tags: fm?.tags?.length ? fm.tags : cls.tags,
+    tags: fm?.tags?.length ? fm.tags : scoredTagNames,
+    // 每个标签的证据来源，供 UI 解释
+    tagMeta: scoredTags,
     summary: fm?.summary || cls.summary,
     classifySource: cls.source,
     needsReview: cls.needsReview,

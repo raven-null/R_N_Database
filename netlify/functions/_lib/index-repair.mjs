@@ -145,6 +145,42 @@ async function readAllMetaFromStore() {
 }
 
 /**
+ * 从 META + TEXT 重建索引与清单（不含 HTTP 包装，供 repair / reclassify 共用）。
+ *
+ * @param {object[]} meta - 全部元数据（会被就地修正：可见性、模型版本、文件夹归位）
+ * @returns {Promise<{index:object, written:object, texts:Map<string,string>}>} 结果
+ */
+export async function rebuildFromMetas(meta) {
+  const textStore = await getDocsStore(STORES.TEXT)
+  const texts = new Map()
+  for (const d of meta) {
+    const t = await textStore.get(d.id, { type: 'json' }).catch(() => null)
+    texts.set(d.id, (t?.pages ?? []).join('\n'))
+  }
+
+  const index = buildIndex(meta, (d) => texts.get(d.id) ?? '')
+  const written = await writeIndex(index)
+
+  // 索引的 docs 清单与词表也要写（列表页与 /taxonomy 都读它们）
+  const indexStore = await getDocsStore(STORES.INDEX)
+  await indexStore.set('docs', JSON.stringify(meta))
+  const storedTax = await indexStore.get('taxonomy', { type: 'json' }).catch(() => null)
+  if (!storedTax?.categories?.length && TAXONOMY_DEFAULT?.categories?.length) {
+    await indexStore.set('taxonomy', JSON.stringify(TAXONOMY_DEFAULT))
+  }
+
+  return { index, written, texts }
+}
+
+/**
+ * 读出全部元数据（不看索引里的 docs 清单 —— 那份可能正是坏的）。
+ * @returns {Promise<object[]>} 元数据
+ */
+export async function readAllMetaForMaintenance() {
+  return await readAllMetaFromStore()
+}
+
+/**
  * POST /api/v1/index/repair（admin）
  *
  * @param {Request} req - 请求
@@ -165,27 +201,11 @@ export async function repairIndex(req, url) {
       }, { req })
     }
 
-    const textStore = await getDocsStore(STORES.TEXT)
-    const texts = new Map()
-    for (const d of meta) {
-      const t = await textStore.get(d.id, { type: 'json' }).catch(() => null)
-      texts.set(d.id, (t?.pages ?? []).join('\n'))
-    }
-
     const visibilityFixed = await backfillVisibility(meta)
     const migrated = await migrateAll(meta)
     const folderLink = await linkFolders(meta)
 
-    const index = buildIndex(meta, (d) => texts.get(d.id) ?? '')
-    const written = await writeIndex(index)
-
-    // 索引的 docs 清单与词表也要写（列表页与 /taxonomy 都读它们）
-    const indexStore = await getDocsStore(STORES.INDEX)
-    await indexStore.set('docs', JSON.stringify(meta))
-    const storedTax = await indexStore.get('taxonomy', { type: 'json' }).catch(() => null)
-    if (!storedTax?.categories?.length && TAXONOMY_DEFAULT?.categories?.length) {
-      await indexStore.set('taxonomy', JSON.stringify(TAXONOMY_DEFAULT))
-    }
+    const { index, written, texts } = await rebuildFromMetas(meta)
 
     const after = await readIndexMeta()
     return ok({

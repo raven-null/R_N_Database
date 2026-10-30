@@ -29,6 +29,7 @@ import { inboxRoute } from './_lib/routes/inbox.mjs'
 import { exportRoute } from './_lib/routes/export.mjs'
 import { foldersRoute } from './_lib/routes/folders.mjs'
 import { repairIndex } from './_lib/index-repair.mjs'
+import { reclassify } from './_lib/reclassify.mjs'
 import { checkAuth } from './_lib/auth.mjs'
 import { badRequest, forbidden, notFound, preflight, serverError } from './_lib/respond.mjs'
 
@@ -115,6 +116,16 @@ export default async (req) => {
           return await repairIndex(req, url)
         }
         return notFound(`未知子路径：${seg.join('/')}`, { req })
+
+      case 'reclassify':
+        // POST /reclassify —— 用当前规则与词表重算全库分类/标签（admin）。
+        // 改了词表或打分规则之后，让已有文档也跟上。
+        {
+          if (req.method !== 'POST') return badRequest('重新分类请用 POST', { req })
+          const a = await checkAuth(req, url, 'admin')
+          if (!a.ok) return forbidden('重新分类需要登录（管理员密码）', { req })
+          return await reclassify(req)
+        }
 
       default:
         return notFound(`未知接口：${seg[0]}`, { req })

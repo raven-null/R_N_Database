@@ -44,7 +44,7 @@ import { readAllMeta, readTaxonomy } from './repo.mjs'
 import {
   detectType, mimeOf, titleFromFilename, pickTitle, extractBytes,
 } from './extract-text.mjs'
-import { classifyByRules, mergeTagsFor } from './classify-rules.mjs'
+import { classifyByRules } from './classify-rules.mjs'
 import { renderCodePage } from './code-view.mjs'
 import { renderMarkdownPage } from './markdown-view.mjs'
 import { applyDocChange } from './index-store.mjs'
@@ -52,6 +52,7 @@ import { escHtml } from './source-view.mjs'
 import TAXONOMY_DEFAULT from './taxonomy-default.mjs'
 import { normalizeDoc } from './doc-model.mjs'
 import { parseFrontMatter, metaFromFrontMatter } from './front-matter.mjs'
+import { scoreTags, tagNames } from './tag-score.mjs'
 import { loadFolders, ensurePath } from './folders.mjs'
 
 /** 单次最多处理多少份（再多会顶到函数时限）。 */
@@ -171,7 +172,18 @@ async function ingestOne(ctx) {
   const folderId = await ensurePath(ctx.folders, uploadRoot)
 
   const cls = classifyByRules(classifyTitle, extracted.text, taxonomy)
-  let tags = mergeTagsFor(cls.categories, cls.tags, taxonomy)
+
+  // 标签：按证据打分（目录 > 标题 > 正文次数），过阈值、最多 5 个。
+  // 老实现把正文里撞到的关键词直接当标签，一份编码规范能拿到 8 个含「物理」的标签。
+  const scoredTags = scoreTags({
+    title,
+    fileName: rec.originalName,
+    dirNames: uploadRoot,
+    body: extracted.text,
+    categories: cls.categories,
+    taxonomy,
+  })
+  let tags = tagNames(scoredTags)
 
   // Markdown 头部自己写了元数据就听它的：人写的永远比规则猜的准。
   // （front matter 已在抽取阶段从正文里摘掉了，不会污染索引）
@@ -239,6 +251,8 @@ async function ingestOne(ctx) {
     updatedAt: now,
     categories: fm?.categories?.length ? fm.categories : cls.categories,
     tags,
+    // 每个标签的证据来源（dir / title / body:n），供 UI 解释"为什么有这个标签"
+    tagMeta: scoredTags,
     summary: fm?.summary || '',
     classifySource: 'rules',
     needsReview: (fm?.categories?.length ? false : cls.categories.includes('未归类'))

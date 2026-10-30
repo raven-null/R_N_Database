@@ -8,9 +8,9 @@
  */
 
 export default {
-  commit: '99bc15b0ad3a',
+  commit: '80ad7782c74d',
   branch: 'main',
   node: '24.18.0',
-  builtAt: '2026-10-30T12:23:59.859Z',
+  builtAt: '2026-10-30T12:30:17.984Z',
   dirty: true,
 }
