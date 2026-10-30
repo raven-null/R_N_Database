@@ -264,7 +264,7 @@ async function testUi() {
 }
 
 async function main() {
-  console.log('▸ R_N_Database 按来源目录浏览 · 回归测试')
+  console.log('▸ 渡·资·集 按来源目录浏览 · 回归测试')
   console.log(`  后端 ${BASE}\n`)
 
   testDirOf()

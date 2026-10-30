@@ -187,7 +187,7 @@ let pass = 0
 let fail = 0
 const failures = []
 
-console.log('▸ R_N_Database 分类回归测试')
+console.log('▸ 渡·资·集 分类回归测试')
 console.log(`  词表 ${taxonomy.categories.length} 类 / 同形词 ${(taxonomy._ambiguousKeywords?.strongWords ?? []).length} 强 + ${(taxonomy._ambiguousKeywords?.mildWords ?? []).length} 弱\n`)
 
 for (const c of CASES) {

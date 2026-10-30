@@ -104,7 +104,7 @@ async function main() {
   const extraEnv = loadExtraEnv()
   const opts = parseArgs()
 
-  console.log('▸ R_N_Database 处理待上传文件\n')
+  console.log('▸ 渡·资·集 处理待上传文件\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
 
   const ai = resolveAIConfig()

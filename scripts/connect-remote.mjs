@@ -93,7 +93,7 @@ async function main() {
   const listOnly = args.includes('--list')
   const siteArg = (args.find((a) => a.startsWith('--site=')) ?? '').slice(7).trim()
 
-  console.log('▸ R_N_Database 连接线上库\n')
+  console.log('▸ 渡·资·集 连接线上库\n')
 
   const env = loadEnv()
   if (env.loaded) console.log(`  已读取 .env（${env.keys.length} 个键）`)

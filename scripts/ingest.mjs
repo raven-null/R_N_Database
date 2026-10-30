@@ -545,7 +545,7 @@ async function main() {
   const extraEnv = loadExtraEnv()
   const opts = parseArgs()
 
-  console.log('▸ R_N_Database 入库\n')
+  console.log('▸ 渡·资·集 入库\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
 
   const ai = resolveAIConfig()

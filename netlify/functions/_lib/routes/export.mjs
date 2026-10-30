@@ -137,7 +137,7 @@ async function buildExport(req) {
   }
 
   zip.file('manifest.json', JSON.stringify({
-    kind: 'R_N_Database 备份',
+    kind: '渡·资·集 备份',
     version: 1,
     exportedAt: new Date().toISOString(),
     docCount: metas.length,
@@ -200,7 +200,7 @@ async function downloadExport(req, exportId) {
     headers: {
       'Content-Type': 'application/zip',
       'Content-Length': String(buf.byteLength),
-      'Content-Disposition': `attachment; filename="R_N_Database-backup-${stamp}.zip"`,
+      'Content-Disposition': `attachment; filename="duziji-backup-${stamp}.zip"`,
       // 备份里有全库内容，绝不能被中间缓存留住
       'Cache-Control': 'private, no-store',
     },

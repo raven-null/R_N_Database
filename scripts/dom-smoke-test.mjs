@@ -595,7 +595,7 @@ async function testCodeEditor() {
    ============================================================ */
 
 async function main() {
-  console.log('▸ R_N_Database 前端冒烟测试')
+  console.log('▸ 渡·资·集 前端冒烟测试')
   console.log(`  后端 ${BASE}`)
 
   try {

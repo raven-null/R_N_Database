@@ -130,7 +130,7 @@ async function searchHits(q, id) {
 }
 
 async function main() {
-  console.log('▸ R_N_Database 内容编辑回归测试')
+  console.log('▸ 渡·资·集 内容编辑回归测试')
   console.log(`  后端 ${BASE}\n`)
 
   try {

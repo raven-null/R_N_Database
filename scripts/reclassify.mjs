@@ -80,7 +80,7 @@ async function main() {
   const env = loadEnv()
   const opts = parseArgs()
 
-  console.log('▸ R_N_Database 重新分类\n')
+  console.log('▸ 渡·资·集 重新分类\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
 
   const ai = resolveAIConfig()

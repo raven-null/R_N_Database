@@ -38,7 +38,9 @@ export async function healthRoute(req, url) {
     }
 
     return ok({
-      name: 'R_N_Database',
+      name: '渡·资·集',
+      // slug 给外部调用方做稳定标识（站点改名时它不变）
+      slug: 'du-zi-ji',
       version: '0.2.0',
       apiVersion: 'v1',
       time: new Date().toISOString(),

@@ -146,7 +146,7 @@ async function dropText(id) {
 }
 
 async function main() {
-  console.log('▸ R_N_Database 增量索引单元测试')
+  console.log('▸ 渡·资·集 增量索引单元测试')
   console.log(`  存储目录 ${STORE_DIR}\n`)
 
   try {

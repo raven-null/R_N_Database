@@ -74,7 +74,7 @@ async function main() {
   const env = loadEnv()
   const opts = parseArgs()
 
-  console.log('▸ R_N_Database 清库\n')
+  console.log('▸ 渡·资·集 清库\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
   console.log(`  位置       ${resolveStoreMode() === 'local' ? '.local-data/' : 'Netlify Blobs'}`)
   console.log('')

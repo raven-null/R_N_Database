@@ -170,7 +170,7 @@ function serveStatic(url, res) {
 
 async function main() {
   const env = loadEnv()
-  console.log('▸ R_N_Database 本地开发服务器\n')
+  console.log('▸ 渡·资·集 本地开发服务器\n')
   console.log(env.loaded
     ? `  · 已加载 .env（${env.keys.length} 个键）`
     : '  · 未发现 .env（使用默认值；这是正常的本地开发状态）')

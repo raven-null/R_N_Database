@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "R_N 个人数据资料库：Netlify Blobs 存储 + 只读公用 API + AI 分类检索",
+  "description": "渡·资·集：个人资料库（Netlify Blobs 存储 + 公用 API + 分类检索 + 网页写作）",
   "engines": {
     "node": ">=20"
   },

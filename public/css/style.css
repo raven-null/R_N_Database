@@ -234,7 +234,7 @@ code, pre {
   color: var(--text);
 }
 .brand::before {
-  content: "藏";
+  content: "渡";
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -248,7 +248,9 @@ code, pre {
   box-shadow: 0 0 0 1px rgba(255, 240, 214, .22) inset, 0 2px 5px rgba(120, 40, 30, .28);
   transform: rotate(-2deg);
 }
-.brand span { color: var(--muted); font-weight: 500; letter-spacing: 1.5px; }
+.brand span { color: var(--text); font-weight: 600; letter-spacing: 2px; }
+/* 名字里的「·」：只当间隔，不能比字更抢眼 */
+.brand i { font-style: normal; margin: 0 2px; color: var(--muted); opacity: .7; font-weight: 400; }
 .brand:hover span { color: var(--accent); }
 
 /* 搜索：左侧一枚题签「检」，框内不再有占位说明 */
@@ -1599,7 +1601,8 @@ iframe {
   }
   .sidebar { max-height: 26vh; padding: 12px 14px; }
   .topbar { padding: 9px 12px; gap: 9px; }
-  .brand span { display: none; }
+  /* 窄屏只留印章（品牌字是 span + 间隔点 i，一起藏） */
+  .brand span, .brand i { display: none; }
   .banner { margin-left: 12px; margin-right: 12px; }
   .doc-link { padding: 11px 12px; gap: 10px; }
   .go { display: none; }

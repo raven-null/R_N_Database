@@ -493,7 +493,7 @@ export default ${JSON.stringify(tax, null, 2)}
 }
 
 async function main() {
-  console.log('▸ R_N_Database 构建校验\n')
+  console.log('▸ 渡·资·集 构建校验\n')
 
   checkStructure()
   await checkFunctions()

@@ -1,4 +1,7 @@
-# R_N_Database · 个人数据资料库
+# 渡·资·集 · 个人资料库
+
+> 站点与界面上叫「渡·资·集」。代码仓库沿用旧名 `R_N_Database`（GitHub 仓库与 remote 不变，
+> 避免打断已有的部署与外部引用）。
 
 存放个人文档资料的私有数据中心。部署在 Netlify，通过公用 API 对接
 [智能工作站](../01-smart-workstation) 与 [个人博客](../01-personal-blog)。

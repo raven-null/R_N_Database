@@ -702,7 +702,7 @@ async function testIngestProvenance() {
 }
 
 async function main() {
-  console.log('▸ R_N_Database 整文件夹上传回归测试')
+  console.log('▸ 渡·资·集 整文件夹上传回归测试')
   console.log(`  后端 ${BASE}\n`)
 
   try {

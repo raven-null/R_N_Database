@@ -116,7 +116,7 @@ async function waitReady(base, timeoutMs = 20000) {
 }
 
 async function main() {
-  console.log('▸ R_N_Database 访问控制回归测试\n')
+  console.log('▸ 渡·资·集 访问控制回归测试\n')
 
   // 常规服务器必须在线（用它造数据、并对比 DEV_NO_GATE 行为）
   try {

@@ -1328,7 +1328,7 @@ async function main() {
   const profileDir = join(ROOT, '.shots', 'chrome-profile')
   mkdirSync(SHOTS, { recursive: true })
 
-  console.log('▸ R_N_Database 真实浏览器渲染检查')
+  console.log('▸ 渡·资·集 真实浏览器渲染检查')
   console.log(`  浏览器 ${browser}`)
 
   const child = spawn(browser, [

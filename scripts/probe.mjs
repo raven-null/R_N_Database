@@ -26,7 +26,7 @@ function line(label, value, status = 'info') {
 }
 
 async function main() {
-  console.log('▸ R_N_Database 环境探测\n')
+  console.log('▸ 渡·资·集 环境探测\n')
 
   // ---- .env ----
   const env = loadEnv()

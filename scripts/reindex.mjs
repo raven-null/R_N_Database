@@ -26,7 +26,7 @@ async function main() {
   const env = loadEnv()
   const t0 = Date.now()
 
-  console.log('▸ R_N_Database 重建索引\n')
+  console.log('▸ 渡·资·集 重建索引\n')
   console.log(`  存储模式   ${resolveStoreMode()}`)
 
   const taxonomy = loadTaxonomy(join(ROOT, 'config', 'taxonomy.json'))
