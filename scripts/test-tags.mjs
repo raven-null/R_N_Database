@@ -95,10 +95,16 @@ async function main() {
   check(!names(oneHit).includes('Java'), '正文只出现一次不算（不产生标签）')
 
   const manyHits = scoreTags({
-    title: '无关标题', body: '多态 '.repeat(20), categories: [], taxonomy: TAXONOMY,
+    title: '无关标题', body: '多态 '.repeat(60), categories: [], taxonomy: TAXONOMY,
   })
   check(names(manyHits).includes('多态'), `正文反复出现才算（${names(manyHits).join(' ')}）`)
   check((manyHits[0]?.from ?? []).some((f) => f.startsWith('body:')), '标出来源是 body:n')
+
+  // 只靠正文不够：几十次的文体性重复不该自动成标签
+  const bodyOnlyWeak = scoreTags({
+    title: '无关标题', body: '英语 '.repeat(12), categories: [], taxonomy: TAXONOMY,
+  })
+  check(!names(bodyOnlyWeak).includes('英语'), '正文十几次还不够（光靠正文不足以成标签）')
 
   /* ---------- 排除项 ---------- */
   console.log('\n【排除项】')
